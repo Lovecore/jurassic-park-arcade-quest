@@ -102,12 +102,38 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         push_event(ev);
         return 0;
     case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: {
+        /* SDL_KeyboardEvent (i386): type, which, state, pad, keysym {
+         * scancode @4, sym @8, mod @12, unicode @16 } */
         uint32_t sym = sdl_key(w);
-        if (!sym) break;
+        if (!sym || (m == WM_KEYDOWN && (l & 0x40000000))) break;   /* no auto-repeat */
         ev[0] = (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) ? 2 : 3;   /* SDL_KEYDOWN / UP */
-        ev[2] = ev[0] == 2 ? 1 : 0;                   /* state */
-        ev[3] = (uint8_t)((l >> 16) & 0xff);           /* scancode */
-        memcpy(ev + 4, &sym, 4);                      /* keysym.sym */
+        ev[2] = ev[0] == 2 ? 1 : 0;
+        ev[4] = (uint8_t)((l >> 16) & 0xff);
+        memcpy(ev + 8, &sym, 4);
+        push_event(ev);
+        return 0;
+    }
+    case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP:
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: {
+        /* SDL_MouseMotionEvent: type 4, which, state @2, x @4, y @6, xrel @8, yrel @10
+         * SDL_MouseButtonEvent: type 5/6, which, button @2, state @3, x @4, y @6
+         * (the game's io_sdl_loop drives the gun's analog x/y from these) */
+        static int lx, ly;
+        uint16_t x = (uint16_t)(short)LOWORD(l), y = (uint16_t)(short)HIWORD(l);
+        int16_t dx = (int16_t)(x - lx), dy = (int16_t)(y - ly);
+        lx = x; ly = y;
+        if (m == WM_MOUSEMOVE) {
+            ev[0] = 4;
+            ev[2] = (uint8_t)(((w & MK_LBUTTON) ? 1 : 0) | ((w & MK_MBUTTON) ? 2 : 0) | ((w & MK_RBUTTON) ? 4 : 0));
+            memcpy(ev + 8, &dx, 2);
+            memcpy(ev + 10, &dy, 2);
+        } else {
+            ev[0] = (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN) ? 5 : 6;
+            ev[2] = (m == WM_LBUTTONDOWN || m == WM_LBUTTONUP) ? 1 : (m == WM_MBUTTONDOWN || m == WM_MBUTTONUP) ? 2 : 3;
+            ev[3] = ev[0] == 5 ? 1 : 0;
+        }
+        memcpy(ev + 4, &x, 2);
+        memcpy(ev + 6, &y, 2);
         push_event(ev);
         return 0;
     }
@@ -122,6 +148,17 @@ static void pump(void)
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+}
+
+static int g_swap_interval = 1;
+
+static void apply_swap_interval(void)
+{
+    BOOL (WINAPI *si)(int);
+    if (!g_rc) return;                         /* applied once the context exists */
+    si = (void *)wglGetProcAddress("wglSwapIntervalEXT");
+    if (si) si(g_swap_interval);
+    klog("swap interval %d\n", g_swap_interval);
 }
 
 static int create_window(int w, int h, int gl)
@@ -148,6 +185,7 @@ static int create_window(int w, int h, int gl)
         SetPixelFormat(g_dc, pf, &pfd);
         g_rc = wglCreateContext(g_dc);
         if (!g_rc || !wglMakeCurrent(g_dc, g_rc)) return -1;
+        apply_swap_interval();
         klog("GL: %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
              (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
     }
@@ -179,6 +217,9 @@ int gl_bound_ELEMENT(void) { return g_bind[1] != 0; }
 int gl_bound_PACK(void) { return g_bind[2] != 0; }
 int gl_bound_UNPACK(void) { return g_bind[3] != 0; }
 
+/* guest-memory shadow for glMapBuffer, one per bind target */
+static struct { uint32_t addr, cap, size; int write, mapped; } g_map[4];
+
 static int gl_manual(rt_cpu *cpu, const char *name)
 {
     if (!strcmp(name, "glBindBuffer") || !strcmp(name, "glBindBufferARB")) {
@@ -200,6 +241,43 @@ static int gl_manual(rt_cpu *cpu, const char *name)
         if (!s) RET(0);
         if (n < 64) { cache[n].key = key; cache[n].g = guest_strdup(s); RET(cache[n++].g); }
         RET(guest_strdup(s));
+    }
+    if (!strcmp(name, "glMapBuffer") || !strcmp(name, "glMapBufferARB")) {
+        /* the guest gets a shadow in guest memory (one per bind target,
+         * reused); glUnmapBuffer uploads it */
+        uint32_t target = ARG(0), access = ARG(1);
+        int32_t size = 0;
+        int k = target == 0x8892 ? 0 : target == 0x8893 ? 1 : target == 0x88eb ? 2 : target == 0x88ec ? 3 : -1;
+        if (k < 0) RET(0);
+        ((void (GLAPI_CALL *)(uint32_t, uint32_t, int32_t *))gl_proc(4003, "glGetBufferParameteriv"))
+            (target, 0x8764 /* GL_BUFFER_SIZE */, &size);
+        if (size <= 0) RET(0);
+        if ((uint32_t)size > g_map[k].cap) {
+            uint32_t cap = ((uint32_t)size + 0xffff) & ~0xffffu, a;
+            if (g_map[k].cap) mem_unmap(g_map[k].addr, g_map[k].cap);
+            a = mem_find(cap, 0xb0000000u);
+            if (!a || mem_map(a, cap) < 0) RET(0);
+            g_map[k].addr = a;
+            g_map[k].cap = cap;
+        }
+        g_map[k].size = (uint32_t)size;
+        g_map[k].write = access != 0x88B8;            /* not READ_ONLY */
+        g_map[k].mapped = 1;
+        if (access != 0x88B9)                         /* not WRITE_ONLY: current contents */
+            ((void (GLAPI_CALL *)(uint32_t, intptr_t, intptr_t, void *))gl_proc(4004, "glGetBufferSubData"))
+                (target, 0, size, RT_P(g_map[k].addr));
+        RET(g_map[k].addr);
+    }
+    if (!strcmp(name, "glUnmapBuffer") || !strcmp(name, "glUnmapBufferARB")) {
+        uint32_t target = ARG(0);
+        int k = target == 0x8892 ? 0 : target == 0x8893 ? 1 : target == 0x88eb ? 2 : target == 0x88ec ? 3 : -1;
+        if (k >= 0 && g_map[k].mapped) {
+            if (g_map[k].write)
+                ((void (GLAPI_CALL *)(uint32_t, intptr_t, intptr_t, const void *))gl_proc(4005, "glBufferSubData"))
+                    (target, 0, g_map[k].size, RT_P(g_map[k].addr));
+            g_map[k].mapped = 0;
+        }
+        RET(1);
     }
     if (!strcmp(name, "glShaderSource") || !strcmp(name, "glShaderSourceARB")) {
         uint32_t sh = ARG(0), cnt = ARG(1), strs = ARG(2), lens = ARG(3), i;
@@ -327,6 +405,30 @@ static int sdl(rt_cpu *cpu, const char *n)
         if (frames < 3)
             klog("swap on thread %lu (GL context current: %p)\n", GetCurrentThreadId(), (void *)wglGetCurrentContext());
         if (g_dc) SwapBuffers(g_dc);
+        {   /* frame pacing: the cabinet ran at the display rate (60 Hz);
+             * drivers may ignore the swap interval, so cap here too */
+            static double next;
+            static int cap = -1;
+            LARGE_INTEGER t, fq;
+            double now;
+            if (cap < 0) {
+                cap = getenv("JPRT_FPSCAP") ? atoi(getenv("JPRT_FPSCAP")) : 60;
+                timeBeginPeriod(1);
+            }
+            if (cap > 0) {
+                QueryPerformanceCounter(&t);
+                QueryPerformanceFrequency(&fq);
+                now = (double)t.QuadPart / (double)fq.QuadPart;
+                if (next == 0 || now > next + 0.25) next = now;
+                next += 1.0 / cap;
+                while (now < next) {
+                    double left = next - now;
+                    if (left > 0.002) Sleep((DWORD)((left - 0.001) * 1000));
+                    QueryPerformanceCounter(&t);
+                    now = (double)t.QuadPart / (double)fq.QuadPart;
+                }
+            }
+        }
         pump();
         if ((++frames % 600) == 1) klog("frame %u\n", frames);
         RET(0);
@@ -371,6 +473,12 @@ static int sdl(rt_cpu *cpu, const char *n)
 int host_impl(rt_cpu *cpu, const char *name)
 {
     if (!strncmp(name, "SDL_", 4)) return sdl(cpu, name);
+    if (!strcmp(name, "glXSwapIntervalSGI") || !strcmp(name, "glXSwapIntervalMESA")) {
+        /* the cabinet ran with vsync; JPRT_VSYNC=0 to run uncapped */
+        g_swap_interval = getenv("JPRT_VSYNC") ? atoi(getenv("JPRT_VSYNC")) : (int)ARG(0);
+        apply_swap_interval();
+        RET(0);
+    }
     if (!strcmp(name, "glXGetProcAddressARB") || !strcmp(name, "glXGetProcAddress"))
         RET(host_thunk_addr(gstr(ARG(0))));
     if (!strncmp(name, "gl", 2) && name[2] >= 'A' && name[2] <= 'Z') return gl_dispatch(cpu, name);

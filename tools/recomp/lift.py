@@ -23,10 +23,12 @@ ROOT = os.path.join(HERE, "..", "..")
 # Current module (set by load_module): its bytes, segments at their guest
 # addresses, and for the game the import names of its absolute PLT stubs.
 data, segs, got_names, IS_GAME = b"", [], {}, False
+MODULE_BASE, MODULE_TAG = 0, "game"
 
 
-def load_module(path, base, is_game):
-    global data, segs, got_names, IS_GAME
+def load_module(path, base, is_game, tag="game"):
+    global data, segs, got_names, IS_GAME, MODULE_BASE, MODULE_TAG
+    MODULE_BASE, MODULE_TAG = base, tag
     data = open(path, "rb").read()
     e_phoff, = struct.unpack_from("<I", data, 28)
     e_phentsize, e_phnum = struct.unpack_from("<HH", data, 42)
@@ -889,6 +891,9 @@ class FuncLifter:
                     o.append(f"    {self.call_target(prev_falls, prev_falls, tail=True)}")
             if a in targets:
                 o.append(f"{self.label(a)}:;")
+            # host pc -> guest instruction: line = offset in the module
+            # (tools/recomp/symbolize.py with -gline-tables-only objects)
+            o.append(f'#line {a - MODULE_BASE} "{MODULE_TAG}"')
             m = ins.mnemonic
             prev_falls = nxt
             try:
@@ -1011,8 +1016,8 @@ def main():
     for mj in modules:
         is_game = mj.get("module", "game") == "game"
         path = mj.get("path") or os.path.join(os.environ.get("JP2015_GAME", os.path.join(ROOT, "jp_game")), "game")
-        load_module(path, mj.get("base", 0), is_game)
         tag = "game" if is_game else "".join(c if c.isalnum() else "_" for c in mj["module"])
+        load_module(path, mj.get("base", 0), is_game, mj.get("module", "game"))
         msel = sorted(f["start"] for f in mj["functions"] if only is None or f["start"] in only)
         sel += msel
         for i in range(0, len(msel), args.per_file):

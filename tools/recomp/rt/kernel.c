@@ -208,7 +208,7 @@ static int load_elf(const char *path, uint32_t base, elf_info *info)
  * ld.so does not look for them (their functions are reached through the
  * dump's frozen GOT entries and dlopen/dlsym, both handled as thunks). */
 static const char *const REPLACED[] = {
-    "libPhysXLoader.so.1", "libSDL-1.2.so.0", "libGL.so.1",
+    "libSDL-1.2.so.0", "libGL.so.1",
     "libGLU.so.1", "libglut.so.3", "libudev.so.1", "libX11.so.6", NULL
 };
 
@@ -466,18 +466,63 @@ static void host_backtrace(void)
     }
 }
 
+/* Debug write watchpoint (JPRT_WATCH=<guest addr>): the page is read-only;
+ * each write faults, is logged with its host pc (symbolize.py maps it to the
+ * guest instruction), then single-stepped with the page writable. */
+static uint32_t g_watch, g_watch_page;
+static volatile LONG g_watch_hits;
+
+static int g_watch_armed;
+
+static void watch_arm(void)
+{
+    DWORD old;
+    VirtualProtect(RT_MEM + g_watch_page, 4096, PAGE_READONLY, &old);
+}
+
+/* called on every syscall: arm the watchpoint once its page is mapped */
+void watch_poll(void)
+{
+    if (g_watch && mem_ok(g_watch_page, 4096)) {
+        if (!g_watch_armed) klog("watchpoint armed: %08x = %08x\n", g_watch, rd32(g_watch));
+        g_watch_armed = 1;
+        watch_arm();          /* re-arm: a MAP_FIXED remap resets page protection */
+    }
+}
+
 static LONG CALLBACK host_fault(EXCEPTION_POINTERS *ep)
 {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (g_watch) {
+        if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2 &&
+            er->ExceptionInformation[0] == 1) {
+            uint64_t a = er->ExceptionInformation[1] - (uint64_t)(uintptr_t)RT_MEM;
+            if (a >= g_watch_page && a < g_watch_page + 4096u) {
+                DWORD old;
+                if (a >= g_watch && a < g_watch + 4u && InterlockedIncrement(&g_watch_hits) < 64) {
+                    klog("WATCH write to %08x (value before %08x) at host pc %p\n", (uint32_t)a,
+                         rd32(g_watch), er->ExceptionAddress);
+                    host_backtrace();
+                }
+                VirtualProtect(RT_MEM + g_watch_page, 4096, PAGE_READWRITE, &old);
+                ep->ContextRecord->EFlags |= 0x100;      /* single-step the write */
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch_armed) {
+            watch_arm();
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || er->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
         host_backtrace();
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
         uint64_t a = er->ExceptionInformation[1];
         if (a >= (uint64_t)(uintptr_t)RT_MEM && a < (uint64_t)(uintptr_t)RT_MEM + (1ull << 32))
-            kfatal(NULL, "guest %s of unmapped address %08x (host rip %p)",
+            kfatal(current_cpu(), "guest %s of unmapped address %08x (host rip %p)",
                    er->ExceptionInformation[0] ? "write" : "read",
                    (uint32_t)(a - (uint64_t)(uintptr_t)RT_MEM), er->ExceptionAddress);
-        kfatal(NULL, "host access violation at %p (address %p)", er->ExceptionAddress, (void *)(uintptr_t)a);
+        kfatal(current_cpu(), "host access violation at %p (address %p)", er->ExceptionAddress, (void *)(uintptr_t)a);
     }
     if (er->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
         kfatal(NULL, "host stack overflow (runaway guest recursion?)");
@@ -533,6 +578,11 @@ int main(int argc, char **argv)
     cpu->fpucw = 0x37f;
     cpu->mxcsr = 0x1f80;
     klog("entering ld.so at %08x, esp %08x\n", ld.entry, cpu->esp);
+    if (getenv("JPRT_WATCH")) {
+        g_watch = (uint32_t)strtoul(getenv("JPRT_WATCH"), NULL, 16);
+        g_watch_page = g_watch & ~0xfffu;
+        klog("watching writes to %08x\n", g_watch);
+    }
     run_guest(cpu, ld.entry, 0);
     return 0;
 }

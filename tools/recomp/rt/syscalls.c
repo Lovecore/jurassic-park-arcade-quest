@@ -41,7 +41,7 @@ static int lerrno(int e)
 /* ---------------------------------------------------------------- VFS */
 static char g_game_dir[1024];       /* host dir backing /pm */
 static char g_root_dir[1024];       /* host dir backing every other absolute path */
-static char g_lib_dirs[6][1024];    /* host dirs with the i386 libraries */
+static char g_lib_dirs[7][1024];    /* host dirs with the i386 libraries */
 static char g_cwd[1024] = "/pm";
 
 /* library sonames -> real file names in the extracted packages */
@@ -50,7 +50,8 @@ static const char *const LIBALIAS[][2] = {
     { "libpthread.so.0", "libpthread-2.19.so" }, { "libdl.so.2", "libdl-2.19.so" },
     { "librt.so.1", "librt-2.19.so" }, { "libstdc++.so.6", "libstdc++.so.6.0.19" },
     { "libogg.so.0", "libogg.so.0.8.1" }, { "libtheora.so.0", "libtheora.so.0.3.10" },
-    { "libnss_files.so.2", "libnss_files-2.19.so" }, { NULL, NULL }
+    { "libnss_files.so.2", "libnss_files-2.19.so" },
+    { "libPhysXCore.so.1", "libPhysXCore.so" }, { "libNxCooking.so.1", "libNxCooking.so" }, { NULL, NULL }
 };
 /* where each library goes (arcade layout, got-layout.md; librt free) */
 static const struct { const char *file; uint32_t base; } LIBBASE[] = {
@@ -58,7 +59,12 @@ static const struct { const char *file; uint32_t base; } LIBBASE[] = {
     { "libpthread-2.19.so", 0xb736f000u }, { "libdl-2.19.so", 0xb75f0000u },
     { "libstdc++.so.6.0.19", 0xb75f5000u }, { "librt-2.19.so", 0xb7748000u },
     { "libogg.so.0.8.1", 0xb76ea000u }, { "libtheora.so.0.3.10", 0xb76f3000u },
-    { "libnss_files-2.19.so", 0xb7790000u }, { NULL, 0 }
+    { "libnss_files-2.19.so", 0xb7790000u },
+    /* PhysX 2.8 i386 runtime from TeknoParrot: the loader is the arcade's
+     * build (its frozen GOT slot = NxGetCookingLib at b76de000+0x88e4);
+     * core/cooking/character get free bases */
+    { "libPhysXLoader.so.1", 0xb76de000u }, { "libPhysXCore.so", 0xa0000000u },
+    { "libNxCooking.so", 0xa0400000u }, { "libNxCharacter.so.1", 0xa0500000u }, { NULL, 0 }
 };
 
 static int host_exists(const char *p) { return _access(p, 0) == 0; }
@@ -109,7 +115,10 @@ void vfs_init(const char *game_dir)
     snprintf(g_lib_dirs[2], 1024, "%s/x_libstdc++6_4.8.2-19ubuntu1_i386/usr/lib/i386-linux-gnu", libdir);
     snprintf(g_lib_dirs[3], 1024, "%s/x_libogg0_1.3.1-1ubuntu1_i386/usr/lib/i386-linux-gnu", libdir);
     snprintf(g_lib_dirs[4], 1024, "%s/x_libtheora0_1.1.1+dfsg.1-3.2_i386/usr/lib/i386-linux-gnu", libdir);
-    g_lib_dirs[5][0] = 0;
+    /* PhysX 2.8 runtime: JPRT_TPLIBS, default <libdir>/../TeknoParrot/ElfLdr2/libs */
+    if (getenv("JPRT_TPLIBS")) snprintf(g_lib_dirs[5], 1024, "%s", getenv("JPRT_TPLIBS"));
+    else snprintf(g_lib_dirs[5], 1024, "%s/../TeknoParrot/ElfLdr2/libs", libdir);
+    g_lib_dirs[6][0] = 0;
     write_etc_files();
     klog("vfs: /pm -> %s, / -> %s, libs in %s\n", g_game_dir, g_root_dir, libdir);
 }
@@ -157,7 +166,7 @@ int vfs_host_path(const char *guest, char *host, size_t n)
         if (strchr(rest, '/')) return 0;
         for (i = 0; LIBALIAS[i][0]; i++)
             if (!strcmp(rest, LIBALIAS[i][0])) { rest = LIBALIAS[i][1]; break; }
-        for (d = 0; d < 6 && g_lib_dirs[d][0]; d++) {
+        for (d = 0; d < 7 && g_lib_dirs[d][0]; d++) {
             snprintf(host, n, "%s/%s", g_lib_dirs[d], rest);
             if (host_exists(host)) return 1;
         }
@@ -379,6 +388,9 @@ rt_cpu *thread_new_cpu(void)
 }
 
 static kthread *self_of(rt_cpu *cpu) { return (kthread *)cpu; }
+
+/* guest CPU of the calling host thread (for crash reports) */
+rt_cpu *current_cpu(void) { return t_self ? &t_self->cpu : NULL; }
 
 void rt_load_gs(rt_cpu *cpu)
 {
@@ -691,6 +703,7 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
     int64_t r = -L_ENOSYS;
     int64_t s, ns;
     fd_init();
+    watch_poll();
     switch (nr) {
     case 1:   thread_exit(cpu, (int)a); break;                                  /* exit */
     case 252: klog("exit_group(%d)\n", (int)a); fflush(NULL); ExitProcess(a);   /* exit_group */

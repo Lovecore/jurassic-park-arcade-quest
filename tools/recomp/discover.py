@@ -109,8 +109,12 @@ sym_sizes = {a: s for a, s, n in syms if in_code(a) and s > 0}
 
 # Unwind info: authoritative function starts/ends + C++ landing pads.
 _ph = [struct.unpack_from("<8I", data, e_phoff + i * e_phentsize) for i in range(e_phnum)]
-EH_HDR = next(p[2] for p in _ph if p[0] == 0x6474e550) + (ARGS.base if MOD else 0)   # PT_GNU_EH_FRAME
-FDES = {f["start"]: f for f in ehframe.fdes(data, v2o, EH_HDR) if in_code(f["start"])}
+EH_HDR = next((p[2] for p in _ph if p[0] == 0x6474e550), None)    # PT_GNU_EH_FRAME
+if EH_HDR is not None:
+    EH_HDR += ARGS.base if MOD else 0
+    FDES = {f["start"]: f for f in ehframe.fdes(data, v2o, EH_HDR) if in_code(f["start"])}
+else:
+    FDES = {}       # no unwind index (old toolchains, e.g. the PhysX 2.8 runtime)
 for a, f in FDES.items():
     if a not in sym_sizes or sym_sizes[a] < f["end"] - a:
         sym_sizes[a] = f["end"] - a
@@ -125,7 +129,7 @@ if MOD:
     # .text ends where the last function ends (.rodata/.eh_frame follow in
     # the same executable segment)
     CODE_HI = max([a + s for a, s in sym_sizes.items()] + [f["end"] for f in FDES.values()])
-    CODE_LO = min(min(FDES), min(named))      # skip the ELF header at the base
+    CODE_LO = min(list(FDES) + list(named))   # skip the ELF header at the base
     if 12 in MOD.dyn:                         # .init sits before .plt/.text
         CODE_LO = min(CODE_LO, ARGS.base + MOD.dyn[12])
     if 13 in MOD.dyn:                         # .fini follows .text
@@ -227,6 +231,8 @@ def is_padding(lo, hi):
     """Only alignment filler: zeros/int3, or nop-like instructions
     (nop, xchg ax,ax, lea r,[r+0], mov r,r)."""
     o = v2o(lo)
+    if o is None or v2o(hi - 1) is None:        # spans a gap between segments
+        return True
     if all(c in (0x00, 0xcc) for c in data[o:o + (hi - lo)]):
         return True
     a = lo
@@ -446,7 +452,7 @@ while work:
 PROLOGUES = (bytes((0x55, 0x89, 0xe5)), bytes((0x55, 0x57, 0x56, 0x53)),
              bytes((0x57, 0x56, 0x53)), bytes((0x56, 0x53, 0x83, 0xec)),
              bytes((0x53, 0x83, 0xec)), bytes((0x83, 0xec)), bytes((0x55, 0x57, 0x56)))
-CODE_START = (min(min(FDES), min(named)) if MOD else
+CODE_START = (min(list(FDES) + list(named)) if MOD else
               min(a for a in named if named[a] == "main"))    # header/.plt below this
 for _round in range(4):
     covered = sorted((b, e) for f in funcs.values() for b, e in f.blocks.items())
@@ -458,6 +464,9 @@ for _round in range(4):
             a = (prev + 15) & ~15
             while a < b:
                 o = v2o(a)
+                if o is None:                  # gap between segments
+                    a += 16
+                    continue
                 if any(data[o:o + len(p)] == p for p in PROLOGUES) and a not in funcs:
                     add_func(a, "orphan")
                     added += 1

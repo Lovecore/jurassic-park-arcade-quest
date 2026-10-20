@@ -317,3 +317,27 @@ build (`ai_docs/windows-pc`) feeds R5 directly.
   (SDL_OpenAudio / SDL_mixer fail), no input mapping yet (keyboard ->
   RIO/start/coin), PhysX loader slot returns 0, the window repaint path
   is unverified (frames verified via read-back only).
+
+### 2026-10-20 (cont.) — PhysX, tooling, frame pacing, GL buffers
+- PhysX: libPhysXLoader (0xb76de000), libPhysXCore (0xa0000000),
+  libNxCooking, and libNxCharacter are now lifted at their arcade bases.
+  discover.py no longer requires .eh_frame; it seeds from
+  symbols, init/fini, and imm values. The "PhysX slot" in the frozen
+  GOT is really `NxGetCookingLib`. Pointing it at TP's
+  `NxCreatePhysicsSDK` wrote through a garbage 5th argument into libc
+  `__exit_funcs`. JPRT_WATCH found it; the fix was loading the real
+  loader at its base.
+- Tooling: lifted C carries `#line <guest-offset> "<module>"`. Building
+  with `-gline-tables-only` lets `symbolize.py` map a host pc to the guest
+  instruction. Other runtime switches: `JPRT_WATCH=addr` (write
+  watchpoint), `JPRT_PEEK`, `JPRT_SHOT_EVERY=N` (back-buffer BMP),
+  `JPRT_FPSCAP`, and `JPRT_VSYNC`. The swap interval is applied after
+  GL context creation, which gives about 60 fps.
+- SDL 1.2 event layout fixed (keysym.sym at +8). Mouse events are
+  delivered.
+- glMapBuffer/glUnmapBuffer: one guest-memory shadow per bind target,
+  copied with glBufferSubData on unmap. This fixed the "too many mapped
+  buffers" fatal. A 150 s run is clean, and attract mode cycles through
+  the title cards and the in-engine gun demo (lasers, targets, HUD).
+- Still unimplemented: SDL_RWFromFile (audio path), and the glX query
+  stubs (glXGetCurrentDisplay, glXQueryVersion, glXGetClientString).

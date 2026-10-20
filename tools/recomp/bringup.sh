@@ -17,12 +17,16 @@ module_of() {    # guest address -> seed file name
     elif [ $a -ge $((0xb7748000)) ]; then echo librt-2.19.so
     elif [ $a -ge $((0xb76f3000)) ]; then echo libtheora.so.0.3.10
     elif [ $a -ge $((0xb76ea000)) ]; then echo libogg.so.0.8.1
+    elif [ $a -ge $((0xb76de000)) ]; then echo libPhysXLoader.so.1
     elif [ $a -ge $((0xb75f5000)) ]; then echo libstdc++.so.6.0.19
     elif [ $a -ge $((0xb75f0000)) ]; then echo libdl-2.19.so
     elif [ $a -ge $((0xb736f000)) ]; then echo libpthread-2.19.so
     elif [ $a -ge $((0xb7320000)) ]; then echo libm-2.19.so
     elif [ $a -ge $((0xb72ef000)) ]; then echo libgcc_s.so.1
     elif [ $a -ge $((0xb7141000)) ]; then echo libc-2.19.so
+    elif [ $a -ge $((0xa0500000)) ] && [ $a -lt $((0xa0600000)) ]; then echo libNxCharacter.so.1
+    elif [ $a -ge $((0xa0400000)) ] && [ $a -lt $((0xa0500000)) ]; then echo libNxCooking.so
+    elif [ $a -ge $((0xa0000000)) ] && [ $a -lt $((0xa0400000)) ]; then echo libPhysXCore.so
     elif [ $a -ge $((0x08048000)) ] && [ $a -lt $((0x09200000)) ]; then echo game
     else echo NONE; fi
 }

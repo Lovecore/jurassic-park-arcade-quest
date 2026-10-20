@@ -8,6 +8,7 @@ PY="$ROOT/.venv/Scripts/python"
 [ -x "$PY" ] || PY=python
 D=${DEBS:-$ROOT/ext/debs}
 L=$D/x_libc6_2.19-0ubuntu6.6_i386/lib/i386-linux-gnu
+TP=${TPLIBS:-$ROOT/ext/TeknoParrot/ElfLdr2/libs}    # PhysX 2.8 i386 runtime (ships with TeknoParrot)
 export JP2015_GAME=${JP2015_GAME:-$ROOT/jp2015-analysis-items/jp2015-analysis}
 "$PY" "$HERE/discover.py" | sed -n 2p
 while read -r so base; do
@@ -25,4 +26,8 @@ $D/x_libstdc++6_4.8.2-19ubuntu1_i386/usr/lib/i386-linux-gnu/libstdc++.so.6.0.19 
 $D/x_libogg0_1.3.1-1ubuntu1_i386/usr/lib/i386-linux-gnu/libogg.so.0.8.1 b76ea000
 $D/x_libtheora0_1.1.1+dfsg.1-3.2_i386/usr/lib/i386-linux-gnu/libtheora.so.0.3.10 b76f3000
 $L/libnss_files-2.19.so b7790000
+$TP/libPhysXLoader.so.1 b76de000
+$TP/libPhysXCore.so a0000000
+$TP/libNxCooking.so a0400000
+$TP/libNxCharacter.so.1 a0500000
 LIBS

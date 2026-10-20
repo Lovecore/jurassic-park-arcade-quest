@@ -18,11 +18,11 @@ if [ "${NOLIFT:-}" != 1 ]; then
         "$O/ld-2.19.so.functions.json" "$O/libc-2.19.so.functions.json" "$O/libdl-2.19.so.functions.json" \
         "$O/libgcc_s.so.1.functions.json" "$O/libm-2.19.so.functions.json" \
         "$O/libpthread-2.19.so.functions.json" "$O/librt-2.19.so.functions.json" \
-        "$O/libstdc++.so.6.0.19.functions.json" "$O/libogg.so.0.8.1.functions.json"         "$O/libtheora.so.0.3.10.functions.json" "$O/libnss_files-2.19.so.functions.json" | head -1
+        "$O/libstdc++.so.6.0.19.functions.json" "$O/libogg.so.0.8.1.functions.json"         "$O/libtheora.so.0.3.10.functions.json" "$O/libnss_files-2.19.so.functions.json"         "$O/libPhysXLoader.so.1.functions.json" "$O/libPhysXCore.so.functions.json"         "$O/libNxCooking.so.functions.json" "$O/libNxCharacter.so.1.functions.json" | head -1
 fi
 P="$O/process"
 mkdir -p "$P/obj"
-CFLAGS="${EXTRA_CFLAGS:-} -O1 -w -fno-strict-aliasing -I$HERE/rt -I$O/c_all"
+CFLAGS="${EXTRA_CFLAGS:-} -O1 -gline-tables-only -w -fno-strict-aliasing -I$HERE/rt -I$O/c_all"
 ls "$O"/c_all/lifted_*.c "$O/c_all/table.c" "$O/c_all/thunks.c" | xargs -P "${JOBS:-16}" -I{} sh -c '
     o="'"$P"'/obj/$(basename {} .c).o"
     [ "$o" -nt {} ] && [ "$o" -nt "'"$HERE/rt/rt.h"'" ] || '"$CC $CFLAGS"' -c {} -o "$o"'
@@ -33,5 +33,5 @@ for o in "$P"/obj/lifted_*.o; do [ -e "$O/c_all/$(basename "$o" .o).c" ] || rm -
 for s in kernel syscalls hostlibs hostgame; do
     "$CC" -O1 -g -Wall -Wno-unused-function -I"$HERE/rt" -c "$HERE/rt/$s.c" -o "$P/obj/rt_$s.o"
 done
-"$CC" -o "$P/jp2015.exe" "$P"/obj/*.o -lsynchronization -lopengl32 -lgdi32 -luser32 -Wl,--stack,67108864
+"$CC" -o "$P/jp2015.exe" "$P"/obj/*.o -lsynchronization -lopengl32 -lgdi32 -luser32 -lwinmm -Wl,--stack,67108864
 echo "built $P/jp2015.exe"

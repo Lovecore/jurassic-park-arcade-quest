@@ -48,6 +48,8 @@ int is_replaced_lib(const char *name);
 void vfs_init(const char *game_dir);
 int  vfs_host_path(const char *guest, char *host, size_t n);
 rt_cpu *thread_new_cpu(void);
+rt_cpu *current_cpu(void);
+void watch_poll(void);                  /* kernel.c: debug write watchpoint */
 int  host_call(rt_cpu *cpu, uint32_t target);
 uint32_t host_thunk_addr(const char *name);    /* guest address that calls host function `name` */
 /* hostlibs.c */
