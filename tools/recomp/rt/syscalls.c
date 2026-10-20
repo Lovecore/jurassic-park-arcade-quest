@@ -668,21 +668,21 @@ static int sys_readlink(const char *path, uint32_t buf, uint32_t n)
     }
 }
 
-static int sys_rw(int write, uint32_t fd, uint32_t buf, uint32_t n)
+static int sys_rw(int is_write, uint32_t fd, uint32_t buf, uint32_t n)
 {
     gfd *f = fd_get(fd);
     int r;
     if (!f) return -L_EBADF;
     if (f->is_dir) return -L_EISDIR;
     if (!n) return 0;
-    if (write && (fd == 1 || fd == 2)) {
+    if (is_write && (fd == 1 || fd == 2)) {
         fwrite(RT_MEM + buf, 1, n, fd == 1 ? stdout : stderr);
         fflush(fd == 1 ? stdout : stderr);
         klog("[guest %s] %.*s%s", fd == 1 ? "stdout" : "stderr", (int)n, (char *)(RT_MEM + buf),
              ((char *)RT_MEM)[buf + n - 1] == '\n' ? "" : "\n");
         return (int)n;
     }
-    r = write ? p_write(f->hfd, RT_MEM + buf, n) : p_read(f->hfd, RT_MEM + buf, n);
+    r = is_write ? p_write(f->hfd, RT_MEM + buf, n) : p_read(f->hfd, RT_MEM + buf, n);
     return r < 0 ? lerrno(errno) : r;
 }
 
@@ -770,7 +770,7 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
                                      if (b) g_sig_handlers[a] = rd32(b); }
                        r = 0; break;                                            /* (rt_)sigaction */
     case 186: if (b) { wr32(b, 0); wr32(b + 4, 2); wr32(b + 8, 0); } r = 0; break;   /* sigaltstack: SS_DISABLE */
-    case 142: case 168: if (nr == 168 && (int32_t)c > 0) Sleep(c); r = 0; break; /* select/poll: nothing ready */
+    case 142: case 168: if (nr == 168 && (int32_t)c > 0) plat_sleep_ms(c); r = 0; break; /* select/poll: nothing ready */
     case 145: case 146: { uint32_t i, tot = 0;                                  /* readv / writev */
                 for (i = 0; i < c; i++) { int k = sys_rw(nr == 146, a, rd32(b + 8 * i), rd32(b + 8 * i + 4));
                     if (k < 0) { if (!tot) tot = (uint32_t)k; break; } tot += (uint32_t)k; if ((uint32_t)k < rd32(b + 8 * i + 4)) break; }
@@ -801,7 +801,7 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
               if (d) { uint64_t cur = b == 3 ? (8u << 20) : b == 7 ? 1024 : ~0ull; wr64(d, cur); wr64(d + 8, ~0ull); }
               r = 0; break;
     case 192: r = sys_mmap2(a, b, c, d, (int32_t)e, f6); break;
-    case 193: case 194: { gfd *fd = fd_get(a); r = fd && fd->hfd >= 0 ? (_chsize_s(fd->hfd, ((int64_t)c << 32) | b) ? -L_EIO : 0) : -L_EBADF; } break;
+    case 193: case 194: { gfd *fd = fd_get(a); r = fd && fd->hfd >= 0 ? (p_ftruncate(fd->hfd, ((int64_t)c << 32) | b) ? -L_EIO : 0) : -L_EBADF; } break;
     case 118: case 148: r = 0; break;                                           /* fsync */
     case 220: r = sys_getdents(a, b, c, 0); break;
     case 141: r = sys_getdents(a, b, c, 1); break;
@@ -816,7 +816,7 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
               wr32(b, (uint32_t)s); wr32(b + 4, (uint32_t)ns); r = 0; break;    /* clock_gettime */
     case 266: if (b) { wr32(b, 0); wr32(b + 4, 1); } r = 0; break;              /* clock_getres */
     case 268: memset(RT_MEM + c, 0, b); wr32(c, 0xef53); wr32(c + 4, 4096); r = 0; break; /* statfs64 */
-    case 42: case 331: { int p[2]; int r0, r1;                                 /* pipe / pipe2 */ if (_pipe(p, 65536, _O_BINARY) < 0) { r = -L_EMFILE; break; }
+    case 42: case 331: { int p[2]; int r0, r1;                                 /* pipe / pipe2 */ if (p_pipe(p) < 0) { r = -L_EMFILE; break; }
                 plat_mutex_lock(&g_fd_cs); r0 = fd_alloc(3); g_fd[r0].hfd = p[0]; r1 = fd_alloc(3); g_fd[r1].hfd = p[1];
                 plat_mutex_unlock(&g_fd_cs); wr32(a, r0); wr32(a + 4, r1); r = 0; } break;
     case 2: case 190: case 11: r = -L_ENOSYS; break;                            /* fork vfork execve */

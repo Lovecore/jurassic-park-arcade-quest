@@ -27,6 +27,7 @@
 #include "gl_host.h"
 #include "glsl_es.h"
 #include "texdecode.h"
+#include "video.h"
 
 #define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
 #define ARGD(i) rdf64(cpu->esp + 4 + 4 * (i))     /* double spanning slots i, i+1 */
@@ -431,6 +432,13 @@ int gles_manual(rt_cpu *cpu, const char *n)
         }
         break;
     case 'B':
+        if (!strcmp(n, "glBindFramebuffer") || !strcmp(n, "glBindFramebufferEXT")) {
+            /* the game's default framebuffer is an offscreen target under OpenXR */
+            uint32_t fb = ARG(1);
+            if (!fb) fb = vid_default_fbo();
+            P(X_BindFramebuffer, "glBindFramebuffer", pf_v2)(ARG(0), fb);
+            RET(0);
+        }
         if (!strcmp(n, "glBindFragDataLocation") || !strcmp(n, "glBindFragDataLocationEXT")) {
             struct gl_prog *p = prog_get(ARG(0));
             const char *name = gstr(ARG(2));
@@ -525,6 +533,17 @@ int gles_manual(rt_cpu *cpu, const char *n)
         }
         break;
     case 'G':
+        if (!strcmp(n, "glGetIntegerv") && vid_default_fbo()) {
+            uint32_t pname = ARG(0), out = ARG(1);
+            int32_t v = 0;
+            if (pname == 0x8CA6 || pname == 0x8CAA) {     /* (DRAW_)FRAMEBUFFER / READ_FRAMEBUFFER_BINDING */
+                P(X_GetIntegerv, "glGetIntegerv", pf_geti)(pname, &v);
+                if ((uint32_t)v == vid_default_fbo()) v = 0;
+                if (out) wr32(out, (uint32_t)v);
+                RET(0);
+            }
+            break;
+        }
         if (!strcmp(n, "glGetString")) {
             static uint32_t vendor, version, slv, exts;
             switch (ARG(0)) {

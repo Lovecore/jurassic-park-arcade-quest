@@ -17,6 +17,9 @@
  *        JPRT_LOG (log file, default jprt.log)
  */
 #include <stdio.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include "rt.h"
@@ -43,6 +46,11 @@ void klog(const char *fmt, ...)
     va_start(ap, fmt);
     if (g_log) { vfprintf(g_log, fmt, ap); fflush(g_log); }
     va_end(ap);
+#if defined(__ANDROID__)
+    va_start(ap, fmt);
+    __android_log_vprint(4 /* ANDROID_LOG_INFO */, "jprt", fmt, ap);
+    va_end(ap);
+#endif
     if (g_verbose) {
         va_start(ap, fmt);
         vfprintf(stderr, fmt, ap);
@@ -567,6 +575,6 @@ int jprt_main(int argc, char **argv)
     return 0;
 }
 
-#if !defined(JPRT_NO_MAIN)
+#if !defined(JPRT_NO_MAIN) && !defined(__ANDROID__)
 int main(int argc, char **argv) { return jprt_main(argc, argv); }
 #endif

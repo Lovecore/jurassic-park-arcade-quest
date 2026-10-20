@@ -30,6 +30,8 @@ static inline void plat_mutex_unlock(plat_mutex *m) { LeaveCriticalSection(m); }
 #define p_open(p, f, m) _open(p, (f) | _O_BINARY, m)
 #define p_close _close
 #define p_dup _dup
+#define p_ftruncate _chsize_s
+#define p_pipe(p) _pipe(p, 65536, _O_BINARY)
 #define p_read _read
 #define p_write _write
 #define p_lseek _lseeki64
@@ -74,6 +76,8 @@ static inline void plat_mutex_unlock(plat_mutex *m) { pthread_mutex_unlock(m); }
 #define p_open(p, f, m) open(p, f, m)
 #define p_close close
 #define p_dup dup
+#define p_ftruncate ftruncate
+#define p_pipe(p) pipe(p)
 #define p_read read
 #define p_write write
 #define p_lseek lseek
