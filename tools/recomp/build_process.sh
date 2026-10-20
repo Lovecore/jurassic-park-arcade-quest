@@ -30,7 +30,7 @@ ls "$O"/c_all/lifted_*.c "$O/c_all/table.c" "$O/c_all/thunks.c" | xargs -P "${JO
 for o in "$P"/obj/lifted_*.o; do [ -e "$O/c_all/$(basename "$o" .o).c" ] || rm -f "$o"; done
 "$PY" "$HERE/gen_gl.py" "$ROOT/ext/khronos/gl.xml" -o "$O/gl_thunks.c" > /dev/null
 "$CC" -O1 -w -I"$HERE/rt" -c "$O/gl_thunks.c" -o "$P/obj/rt_gl_thunks.o"
-for s in kernel syscalls hostlibs hostaudio hostgame; do
+for s in kernel syscalls hostlibs hostaudio hostgame gles glsl_es texdecode; do
     "$CC" -O1 -g -Wall -Wno-unused-function -I"$HERE/rt" -c "$HERE/rt/$s.c" -o "$P/obj/rt_$s.o"
 done
 "$CC" -o "$P/jp2015.exe" "$P"/obj/*.o -lsynchronization -lopengl32 -lgdi32 -luser32 -lwinmm -Wl,--stack,67108864

@@ -183,6 +183,7 @@ static void pump(void)
     }
 }
 
+extern int g_gles;                    /* gles.c: the context is OpenGL ES */
 static int g_swap_interval = 1;
 
 static void apply_swap_interval(void)
@@ -218,6 +219,19 @@ static int create_window(int w, int h, int gl)
         SetPixelFormat(g_dc, pf, &pfd);
         g_rc = wglCreateContext(g_dc);
         if (!g_rc || !wglMakeCurrent(g_dc, g_rc)) return -1;
+        if (getenv("JPRT_GLES") && atoi(getenv("JPRT_GLES"))) {
+            /* OpenGL ES 3.2 profile context (WGL_EXT_create_context_es2_profile):
+             * the Quest's API, exercised on the PC */
+            HGLRC (WINAPI *cca)(HDC, HGLRC, const int *) = (void *)wglGetProcAddress("wglCreateContextAttribsARB");
+            const int attr[] = { 0x2091, 3, 0x2092, 2, 0x9126, 0x4, 0 };
+            HGLRC es = cca ? cca(g_dc, NULL, attr) : NULL;
+            if (!es) kfatal(NULL, "JPRT_GLES: no OpenGL ES 3.2 context on this host");
+            wglMakeCurrent(NULL, NULL);
+            wglDeleteContext(g_rc);
+            g_rc = es;
+            if (!wglMakeCurrent(g_dc, g_rc)) return -1;
+            g_gles = 1;
+        }
         apply_swap_interval();
         klog("GL: %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
              (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
@@ -249,6 +263,8 @@ int gl_bound_ARRAY(void) { return g_bind[0] != 0; }
 int gl_bound_ELEMENT(void) { return g_bind[1] != 0; }
 int gl_bound_PACK(void) { return g_bind[2] != 0; }
 int gl_bound_UNPACK(void) { return g_bind[3] != 0; }
+uint32_t gl_bound_element_buffer(void) { return g_bind[1]; }
+
 
 /* guest-memory shadow for glMapBuffer, one per bind target */
 static struct { uint32_t addr, cap, size; int write, mapped; } g_map[4];
@@ -296,9 +312,15 @@ static int gl_manual(rt_cpu *cpu, const char *name)
         g_map[k].size = (uint32_t)size;
         g_map[k].write = access != 0x88B8;            /* not READ_ONLY */
         g_map[k].mapped = 1;
-        if (access != 0x88B9)                         /* not WRITE_ONLY: current contents */
+        if (access != 0x88B9 && !g_gles)              /* not WRITE_ONLY: current contents */
             ((void (GLAPI_CALL *)(uint32_t, intptr_t, intptr_t, void *))gl_proc(4004, "glGetBufferSubData"))
                 (target, 0, size, RT_P(g_map[k].addr));
+        else if (access != 0x88B9) {                  /* ES: no glGetBufferSubData */
+            void *m = ((void *(GLAPI_CALL *)(uint32_t, intptr_t, intptr_t, uint32_t))gl_proc(4006, "glMapBufferRange"))
+                (target, 0, size, 0x1 /* MAP_READ_BIT */);
+            if (m) memcpy(RT_P(g_map[k].addr), m, (size_t)size);
+            ((uint8_t (GLAPI_CALL *)(uint32_t))gl_proc(4007, "glUnmapBuffer"))(target);
+        }
         RET(g_map[k].addr);
     }
     if (!strcmp(name, "glUnmapBuffer") || !strcmp(name, "glUnmapBufferARB")) {
@@ -316,6 +338,19 @@ static int gl_manual(rt_cpu *cpu, const char *name)
         uint32_t sh = ARG(0), cnt = ARG(1), strs = ARG(2), lens = ARG(3), i;
         const char **hs = malloc(sizeof(char *) * (cnt ? cnt : 1));
         for (i = 0; i < cnt; i++) hs[i] = gstr(rd32(strs + 4 * i));
+        if (getenv("JPRT_SHADER_DUMP")) {   /* dir: one file per glShaderSource */
+            static int k;
+            char path[512];
+            FILE *f;
+            snprintf(path, sizeof(path), "%s/sh_%04d_%u.glsl", getenv("JPRT_SHADER_DUMP"), k++, sh);
+            if ((f = fopen(path, "wb"))) {
+                for (i = 0; i < cnt; i++) {
+                    int32_t l = lens ? (int32_t)rd32(lens + 4 * i) : -1;
+                    fwrite(hs[i], 1, l >= 0 ? (size_t)l : strlen(hs[i]), f);
+                }
+                fclose(f);
+            }
+        }
         ((void (GLAPI_CALL *)(uint32_t, uint32_t, const char **, const int32_t *))gl_proc(4002, "glShaderSource"))
             (sh, cnt, hs, lens ? (const int32_t *)RT_P(lens) : NULL);
         free(hs);
@@ -324,9 +359,29 @@ static int gl_manual(rt_cpu *cpu, const char *name)
     return 0;
 }
 
-static int gl_dispatch(rt_cpu *cpu, const char *name)
+/* JPRT_GLTRACE=1: log every distinct GL entry point on first use (the
+ * surface a GLES backend has to cover) */
+static void gl_trace(const char *name)
+{
+    static int on = -1, n;
+    static const char *seen[1024];
+    int i;
+    if (on < 0) on = getenv("JPRT_GLTRACE") != NULL;
+    if (!on) return;
+    for (i = 0; i < n; i++) if (seen[i] == name || !strcmp(seen[i], name)) return;
+    if (n < 1024) seen[n++] = name;
+    klog("gltrace: %s\n", name);
+}
+
+void gl_census(rt_cpu *cpu, const char *n);      /* gles.c */
+int gles_manual(rt_cpu *cpu, const char *n);
+
+static int gl_dispatch_inner(rt_cpu *cpu, const char *name)
 {
     int lo, hi;
+    gl_trace(name);
+    gl_census(cpu, name);
+    if (gles_manual(cpu, name)) return 1;
     if (gl_manual(cpu, name)) return 1;
     {
         static const struct gl_thunk **sorted;
@@ -350,6 +405,38 @@ static int gl_dispatch(rt_cpu *cpu, const char *name)
         }
     }
     return 0;
+}
+
+/* JPRT_GLCHECK=1: glGetError after every call, first error per entry point
+ * logged (the game's own glGetError calls then see GL_NO_ERROR) */
+static int gl_dispatch(rt_cpu *cpu, const char *name)
+{
+    static int check = -1;
+    uint32_t a[5], k, ra = rd32(cpu->esp);
+    int r;
+    for (k = 0; k < 5; k++) a[k] = rd32(cpu->esp + 4 + 4 * k);
+    r = gl_dispatch_inner(cpu, name);
+    if (check < 0) check = getenv("JPRT_GLCHECK") != NULL;
+    if (check && r && strcmp(name, "glGetError")) {
+        static struct { const char *n; int c; } seen[256];
+        static int ns;
+        uint32_t e = glGetError();
+        int i;
+        if (e) {
+            for (i = 0; i < ns && strcmp(seen[i].n, name); i++) {}
+            if (i == ns && ns < 256) seen[ns++].n = name;
+            if (i < 256 && seen[i].c++ < 4) {
+                int32_t dfb = 0, rfb = 0;
+                glGetIntegerv(0x8CA6, &dfb);
+                glGetIntegerv(0x8CAA, &rfb);
+                klog("glcheck: %s(%#x, %#x, %#x, %#x, %#x) -> error %#x [from %08x, draw fb %d, read fb %d]\n",
+                     name, a[0], a[1], a[2], a[3], a[4], e, ra, dfb, rfb);
+                if (!strcmp(name, "glDrawBuffers") && a[1])
+                    for (k = 0; k < a[0] && k < 8; k++) klog("glcheck:   bufs[%u] = %#x\n", k, rd32(a[1] + 4 * k));
+            }
+        }
+    }
+    return r;
 }
 
 /* ---- SDL 1.2 ---- */
@@ -429,9 +516,18 @@ static int sdl(rt_cpu *cpu, const char *n)
             uint8_t *px = malloc((size_t)stride * h);
             char path[64];
             FILE *f;
+            uint8_t *rgba = malloc((size_t)w * h * 4);
+            int x;
             glPixelStorei(GL_PACK_ALIGNMENT, 4);
             glReadBuffer(GL_BACK);
-            glReadPixels(0, 0, w, h, 0x80E0 /* GL_BGR */, GL_UNSIGNED_BYTE, px);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);   /* BGR is not in ES */
+            for (y = 0; y < h; y++)
+                for (x = 0; x < w; x++) {
+                    const uint8_t *s = rgba + ((size_t)y * w + x) * 4;
+                    uint8_t *d = px + (size_t)y * stride + (size_t)x * 3;
+                    d[0] = s[2]; d[1] = s[1]; d[2] = s[0];
+                }
+            free(rgba);
             snprintf(path, sizeof(path), "frame_%06u.bmp", frames);
             if ((f = fopen(path, "wb"))) {
                 uint8_t hd[54] = { 'B', 'M' };
