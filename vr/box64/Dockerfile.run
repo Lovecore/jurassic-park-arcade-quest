@@ -1,0 +1,8 @@
+# box32 perf probe host: native AArch64 GL/SDL/X11 for box64 to wrap, plus
+# Xvfb and screenshot tools. i386-only libs come from the kit rootfs.
+FROM --platform=linux/arm64 debian:bookworm-slim
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libgl1 libglx-mesa0 libgl1-mesa-dri libglu1-mesa libsdl1.2debian libudev1 \
+    libogg0 libvorbis0a libvorbisfile3 libx11-6 libxext6 \
+    xvfb x11-apps imagemagick procps && rm -rf /var/lib/apt/lists/*
+COPY --from=jp2015-box64 /out/box64 /usr/local/bin/box64

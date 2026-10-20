@@ -1,0 +1,9 @@
+# arm64-native runner with qemu-user + gdb for controlled i386 debug, plus a
+# native headless X server and screenshot tools for Q0 boot tests.
+# Build:  docker build -f vr/q0/Dockerfile.qemu -t jp2015-qemu vr/q0
+FROM debian:bookworm-slim
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    qemu-user gdb-multiarch procps xvfb x11-apps x11-utils imagemagick xauth \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /pm
+CMD ["/bin/bash"]

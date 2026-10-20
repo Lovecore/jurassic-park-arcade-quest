@@ -1,0 +1,13 @@
+# Minimal i386 runtime rootfs for the JP2015 kit: only what the game and the
+# shim load at run time (no compiler, no X server). Exported to kit/rootfs.
+#   docker build --platform linux/386 -f vr/kit/Dockerfile.rootfs -t jp2015-rootfs vr/kit
+FROM --platform=linux/386 debian:bookworm-slim
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libsdl1.2debian libgl1 libglx-mesa0 libgl1-mesa-dri libglu1-mesa libglut3.12 \
+    libtheora0 libogg0 libvorbisfile3 libudev1 libx11-6 libxext6 \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc /usr/share/man /usr/share/locale \
+              /usr/share/info /var/cache/debconf/*-old
+# The game dlopens libglut.so.3 and links libPhysXLoader.so.1 (no symbols
+# used; empty stub until a real PhysX 2.8.1 runtime is sourced).
+COPY libPhysXLoader.so.1 /usr/lib/i386-linux-gnu/
+RUN ln -sf libglut.so.3.12 /usr/lib/i386-linux-gnu/libglut.so.3 && mkdir -p /jpdeps

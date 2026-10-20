@@ -1,0 +1,11 @@
+set architecture i386
+set pagination off
+target remote localhost:1234
+break *0x904428d
+continue
+bt
+info registers eip esp ebp eax ebx ecx edx esi edi
+x/2i $eip
+# walk stack manually: 32 words at esp
+x/32wx $esp
+quit

@@ -1,0 +1,40 @@
+# Never commit game files: this is a personal interoperability project.
+# Point JP2015_GAME (or the jp_game symlink) at your own TP dump instead.
+/Jurassic Park*/
+/jp_game
+/game
+*.q0bak
+game.preundef.bak
+game_original
+symbols_original.txt
+vr/kit/test/overlay/
+vr/ghidra/game.snapshot
+vr/ghidra/decomp/
+
+# Build outputs and large regenerable data
+.venv/
+__pycache__/
+.DS_Store
+*.xwd
+vr/shim/vr_shim.so
+vr/kit/out/
+vr/kit/test/state/
+vr/kit/test/shots/
+vr/kit/test/*.log
+vr/kit/test/*.out
+vr/q0/rootfs/
+vr/q0/u1404/
+vr/q0/u1404libs/
+vr/q0/debs/
+vr/q0/shots/
+vr/q0/core*
+vr/q0/*.core
+vr/q0/*.log
+vr/q0/*.out
+vr/q0/shot.*
+vr/q0/game.*
+vr/q0/got_fixups.v1.*
+vr/box64/out/
+vr/box64/*.log
+vr/ghidra/*.out
+vr/ghidra/*.log

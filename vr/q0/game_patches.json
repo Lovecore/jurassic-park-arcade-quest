@@ -1,0 +1,449 @@
+[
+ {
+  "group": "descriptor-slots",
+  "off": 17429496,
+  "va": 151942136,
+  "old": "b07d1ab7",
+  "new": "167b0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429508,
+  "va": 151942148,
+  "old": "60d037b7",
+  "new": "467b0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429516,
+  "va": 151942156,
+  "old": "40761fb7",
+  "new": "667b0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429544,
+  "va": 151942184,
+  "old": "c07d22b7107d1bb7e0d037b7e03717b7100f5fb7d07f1bb7",
+  "new": "d67b0409e67b0409f67b0409067c0409167c0409267c0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429580,
+  "va": 151942220,
+  "old": "e0d326b7",
+  "new": "667c0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429612,
+  "va": 151942252,
+  "old": "e02226b7307a1eb7607c1bb7400e5fb7",
+  "new": "e67c0409f67c0409067d0409167d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429632,
+  "va": 151942272,
+  "old": "b0e337b7",
+  "new": "367d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429648,
+  "va": 151942288,
+  "old": "50e622b7f09137b7",
+  "new": "767d0409867d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429664,
+  "va": 151942304,
+  "old": "70431ab7",
+  "new": "b67d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429672,
+  "va": 151942312,
+  "old": "50701eb7",
+  "new": "d67d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429680,
+  "va": 151942320,
+  "old": "f0e426b7",
+  "new": "f67d0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429688,
+  "va": 151942328,
+  "old": "d04d1ab7",
+  "new": "167e0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429720,
+  "va": 151942360,
+  "old": "a0761fb760",
+  "new": "967e0409a6",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429726,
+  "va": 151942366,
+  "old": "37b730d927b7",
+  "new": "0409b67e0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429756,
+  "va": 151942396,
+  "old": "107a1eb7",
+  "new": "267f0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429768,
+  "va": 151942408,
+  "old": "b0761bb7208037b7804226b7404c22b7d0105fb740dc21b7",
+  "new": "567f0409667f0409767f0409867f0409967f0409a67f0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429804,
+  "va": 151942444,
+  "old": "b02326b7",
+  "new": "e67f0409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429812,
+  "va": 151942452,
+  "old": "60d237b7",
+  "new": "06800409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429828,
+  "va": 151942468,
+  "old": "20cf37b7",
+  "new": "46800409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429844,
+  "va": 151942484,
+  "old": "40711eb7802226b710521ab7805a1fb7",
+  "new": "8680040996800409a6800409b6800409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "descriptor-slots",
+  "off": 17429896,
+  "va": 151942536,
+  "old": "80d521b7",
+  "new": "56810409",
+  "why": "envelope descriptor slot: stale arcade libc address -> envelope slow-path stub, so the envelope resolver binds it at runtime"
+ },
+ {
+  "group": "undefine-export",
+  "off": 162124,
+  "va": 134674764,
+  "old": "21",
+  "new": "00",
+  "symbol": "_ZTISt9exception",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 167980,
+  "va": 134680620,
+  "old": "12",
+  "new": "00",
+  "symbol": "inflateInit2_",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 177004,
+  "va": 134689644,
+  "old": "12",
+  "new": "00",
+  "symbol": "inflateReset",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 177180,
+  "va": 134689820,
+  "old": "12",
+  "new": "00",
+  "symbol": "main",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 184732,
+  "va": 134697372,
+  "old": "11",
+  "new": "00",
+  "symbol": "_ZNSbIwSt11char_traitsIwESaIwEE4_Rep20_S_empty_rep_storageE",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 206588,
+  "va": 134719228,
+  "old": "21",
+  "new": "00",
+  "symbol": "_ZTVN10__cxxabiv117__class_type_infoE",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 218044,
+  "va": 134730684,
+  "old": "12",
+  "new": "00",
+  "symbol": "adler32",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 218252,
+  "va": 134730892,
+  "old": "12",
+  "new": "00",
+  "symbol": "strcmp",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 221932,
+  "va": 134734572,
+  "old": "11",
+  "new": "00",
+  "symbol": "_IO_stdin_used",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 241532,
+  "va": 134754172,
+  "old": "12",
+  "new": "00",
+  "symbol": "deflateReset",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 258188,
+  "va": 134770828,
+  "old": "12",
+  "new": "00",
+  "symbol": "zlibVersion",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 263836,
+  "va": 134776476,
+  "old": "11",
+  "new": "00",
+  "symbol": "stdout",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 281164,
+  "va": 134793804,
+  "old": "21",
+  "new": "00",
+  "symbol": "_ZTVN10__cxxabiv120__si_class_type_infoE",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 282972,
+  "va": 134795612,
+  "old": "12",
+  "new": "00",
+  "symbol": "malloc",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 353740,
+  "va": 134866380,
+  "old": "11",
+  "new": "00",
+  "symbol": "glutBitmap8By13",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 361340,
+  "va": 134873980,
+  "old": "11",
+  "new": "00",
+  "symbol": "stderr",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 361660,
+  "va": 134874300,
+  "old": "12",
+  "new": "00",
+  "symbol": "inflate",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 375852,
+  "va": 134888492,
+  "old": "11",
+  "new": "00",
+  "symbol": "stdin",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 376636,
+  "va": 134889276,
+  "old": "12",
+  "new": "00",
+  "symbol": "deflate",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 388716,
+  "va": 134901356,
+  "old": "12",
+  "new": "00",
+  "symbol": "uncompress",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 398652,
+  "va": 134911292,
+  "old": "12",
+  "new": "00",
+  "symbol": "deflateInit2_",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 402060,
+  "va": 134914700,
+  "old": "12",
+  "new": "00",
+  "symbol": "__gxx_personality_v0",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 402556,
+  "va": 134915196,
+  "old": "12",
+  "new": "00",
+  "symbol": "deflateEnd",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 413788,
+  "va": 134926428,
+  "old": "12",
+  "new": "00",
+  "symbol": "free",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 434012,
+  "va": 134946652,
+  "old": "12",
+  "new": "00",
+  "symbol": "__cxa_pure_virtual",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 436620,
+  "va": 134949260,
+  "old": "12",
+  "new": "00",
+  "symbol": "compress",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 439884,
+  "va": 134952524,
+  "old": "12",
+  "new": "00",
+  "symbol": "inflateEnd",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 443516,
+  "va": 134956156,
+  "old": "11",
+  "new": "00",
+  "symbol": "_ZNSs4_Rep20_S_empty_rep_storageE",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 444188,
+  "va": 134956828,
+  "old": "12",
+  "new": "00",
+  "symbol": "crc32",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 451308,
+  "va": 134963948,
+  "old": "12",
+  "new": "00",
+  "symbol": "deflateInit_",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ },
+ {
+  "group": "undefine-export",
+  "off": 452748,
+  "va": 134965388,
+  "old": "12",
+  "new": "00",
+  "symbol": "realloc",
+  "why": "game export collides with a system-library symbol; libs must bind to the system copy (st_shndx -> SHN_UNDEF low byte)"
+ }
+]
