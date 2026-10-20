@@ -1,0 +1,389 @@
+/*
+ * hostlibs.c — host implementations of the libraries the recompiled
+ * process does not run itself: SDL 1.2 (subset the game uses), OpenGL
+ * (generated thunks in out/gl_thunks.c + the hand-written ones here), GLX
+ * proc lookup, GLU, glut, udev, X11. Windows host: Win32 window + WGL.
+ *
+ * Called from host_call() with the guest stack as on i386: [esp] is the
+ * return address, arguments above it; results go to eax (or st0), and the
+ * handler pops the return address.
+ *
+ * Bring-up state: video/GL/events/timers are real; audio, joystick, udev
+ * and X11 are stubs that report failure, so the game takes its own
+ * "no device" paths.
+ */
+#include <windows.h>
+#include <GL/gl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "rt.h"
+#include "kernel.h"
+#include "gl_host.h"
+
+#define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
+#define ARGF(i) rdf32(cpu->esp + 4 + 4 * (i))
+#define RET(v) do { cpu->eax = (uint32_t)(v); cpu->esp += 4; return 1; } while (0)
+
+/* ---- guest memory owned by the host (SDL surfaces, strings) ---- */
+#define HOSTHEAP_BASE 0xb6000000u
+#define HOSTHEAP_SIZE 0x00400000u
+static uint32_t g_hh_next;
+
+/* Reserved at startup, before the guest maps anything (mapping it later
+ * would zero guest pages the guest's mmap may have put there). */
+void host_heap_init(void)
+{
+    mem_map(HOSTHEAP_BASE, HOSTHEAP_SIZE);
+    g_hh_next = HOSTHEAP_BASE;
+}
+
+uint32_t guest_alloc(uint32_t n)
+{
+    uint32_t a;
+    n = (n + 15) & ~15u;
+    if (g_hh_next + n > HOSTHEAP_BASE + HOSTHEAP_SIZE) kfatal(NULL, "host heap exhausted");
+    a = g_hh_next;
+    g_hh_next += n;
+    return a;
+}
+
+uint32_t guest_strdup(const char *s)
+{
+    uint32_t n = (uint32_t)strlen(s) + 1, a = guest_alloc(n);
+    memcpy(RT_P(a), s, n);
+    return a;
+}
+
+/* ---- window + GL context ---- */
+static HWND g_wnd;
+static HDC g_dc;
+static HGLRC g_rc;
+static int g_w = 1360, g_h = 768;
+static uint32_t g_surface;            /* guest SDL_Surface */
+static uint32_t g_errstr;
+static LARGE_INTEGER g_t0, g_freq;
+
+/* SDL event queue (guest SDL_Event layout, 20 bytes) */
+#define QN 256
+static uint8_t g_evq[QN][20];
+static int g_evh, g_evt;
+
+static void push_event(const uint8_t *ev)
+{
+    int n = (g_evt + 1) % QN;
+    if (n == g_evh) return;
+    memcpy(g_evq[g_evt], ev, 20);
+    g_evt = n;
+}
+
+static uint32_t sdl_key(WPARAM vk)
+{
+    if (vk >= 'A' && vk <= 'Z') return (uint32_t)(vk - 'A' + 'a');
+    if (vk >= '0' && vk <= '9') return (uint32_t)vk;
+    switch (vk) {
+    case VK_ESCAPE: return 27; case VK_RETURN: return 13; case VK_SPACE: return 32;
+    case VK_BACK: return 8; case VK_TAB: return 9;
+    case VK_UP: return 273; case VK_DOWN: return 274; case VK_RIGHT: return 275; case VK_LEFT: return 276;
+    case VK_F1: return 282; case VK_F2: return 283; case VK_F3: return 284; case VK_F4: return 285;
+    case VK_F5: return 286; case VK_F6: return 287; case VK_F7: return 288; case VK_F8: return 289;
+    case VK_F9: return 290; case VK_F10: return 291; case VK_F11: return 292; case VK_F12: return 293;
+    case VK_SHIFT: return 304; case VK_CONTROL: return 306; case VK_MENU: return 308;
+    default: return 0;
+    }
+}
+
+static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    uint8_t ev[20] = { 0 };
+    switch (m) {
+    case WM_CLOSE:
+        ev[0] = 12;                                   /* SDL_QUIT */
+        push_event(ev);
+        return 0;
+    case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: {
+        uint32_t sym = sdl_key(w);
+        if (!sym) break;
+        ev[0] = (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) ? 2 : 3;   /* SDL_KEYDOWN / UP */
+        ev[2] = ev[0] == 2 ? 1 : 0;                   /* state */
+        ev[3] = (uint8_t)((l >> 16) & 0xff);           /* scancode */
+        memcpy(ev + 4, &sym, 4);                      /* keysym.sym */
+        push_event(ev);
+        return 0;
+    }
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static void pump(void)
+{
+    MSG msg;
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+}
+
+static int create_window(int w, int h, int gl)
+{
+    WNDCLASSA wc = { 0 };
+    RECT r = { 0, 0, w, h };
+    PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+                                  PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 24, 8, 0,
+                                  PFD_MAIN_PLANE, 0, 0, 0, 0 };
+    if (g_wnd) return 0;
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "jp2015";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassA(&wc);
+    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    g_wnd = CreateWindowA("jp2015", "Jurassic Park (recompiled)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                          CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+                          NULL, NULL, wc.hInstance, NULL);
+    if (!g_wnd) return -1;
+    g_dc = GetDC(g_wnd);
+    if (gl) {
+        int pf = ChoosePixelFormat(g_dc, &pfd);
+        SetPixelFormat(g_dc, pf, &pfd);
+        g_rc = wglCreateContext(g_dc);
+        if (!g_rc || !wglMakeCurrent(g_dc, g_rc)) return -1;
+        klog("GL: %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
+             (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
+    }
+    pump();
+    return 0;
+}
+
+/* ---- GL host pieces ---- */
+static void *g_procs[4096];
+static HMODULE g_ogl;
+
+void *gl_proc(int idx, const char *name)
+{
+    void *p = idx < 4096 ? g_procs[idx] : NULL;
+    if (p) return p;
+    p = (void *)wglGetProcAddress(name);
+    if ((uintptr_t)p <= 3 || (intptr_t)p == -1) {
+        if (!g_ogl) g_ogl = LoadLibraryA("opengl32.dll");
+        p = (void *)GetProcAddress(g_ogl, name);
+    }
+    if (!p) kfatal(NULL, "GL: %s not available on this host", name);
+    if (idx < 4096) g_procs[idx] = p;
+    return p;
+}
+
+static uint32_t g_bind[4];            /* ARRAY ELEMENT PACK UNPACK */
+int gl_bound_ARRAY(void) { return g_bind[0] != 0; }
+int gl_bound_ELEMENT(void) { return g_bind[1] != 0; }
+int gl_bound_PACK(void) { return g_bind[2] != 0; }
+int gl_bound_UNPACK(void) { return g_bind[3] != 0; }
+
+static int gl_manual(rt_cpu *cpu, const char *name)
+{
+    if (!strcmp(name, "glBindBuffer") || !strcmp(name, "glBindBufferARB")) {
+        uint32_t t = ARG(0), b = ARG(1);
+        int k = t == 0x8892 ? 0 : t == 0x8893 ? 1 : t == 0x88eb ? 2 : t == 0x88ec ? 3 : -1;
+        if (k >= 0) g_bind[k] = b;
+        ((void (GLAPI_CALL *)(uint32_t, uint32_t))gl_proc(4000, "glBindBuffer"))(t, b);
+        RET(0);
+    }
+    if (!strcmp(name, "glGetString") || !strcmp(name, "glGetStringi")) {
+        static struct { uint32_t key; uint32_t g; } cache[64];
+        static int n;
+        uint32_t e = ARG(0), idx = name[11] == 'i' ? ARG(1) : 0xffffffffu, key = e * 4099u + idx;
+        const char *s;
+        int i;
+        for (i = 0; i < n; i++) if (cache[i].key == key) RET(cache[i].g);
+        s = idx == 0xffffffffu ? (const char *)glGetString(e)
+                               : ((const char *(GLAPI_CALL *)(uint32_t, uint32_t))gl_proc(4001, "glGetStringi"))(e, idx);
+        if (!s) RET(0);
+        if (n < 64) { cache[n].key = key; cache[n].g = guest_strdup(s); RET(cache[n++].g); }
+        RET(guest_strdup(s));
+    }
+    if (!strcmp(name, "glShaderSource") || !strcmp(name, "glShaderSourceARB")) {
+        uint32_t sh = ARG(0), cnt = ARG(1), strs = ARG(2), lens = ARG(3), i;
+        const char **hs = malloc(sizeof(char *) * (cnt ? cnt : 1));
+        for (i = 0; i < cnt; i++) hs[i] = gstr(rd32(strs + 4 * i));
+        ((void (GLAPI_CALL *)(uint32_t, uint32_t, const char **, const int32_t *))gl_proc(4002, "glShaderSource"))
+            (sh, cnt, hs, lens ? (const int32_t *)RT_P(lens) : NULL);
+        free(hs);
+        RET(0);
+    }
+    return 0;
+}
+
+static int gl_dispatch(rt_cpu *cpu, const char *name)
+{
+    int lo, hi;
+    if (gl_manual(cpu, name)) return 1;
+    {
+        static const struct gl_thunk **sorted;
+        static int ns;
+        if (!sorted) {
+            int i, j;
+            sorted = malloc(sizeof(*sorted) * gl_thunk_count);
+            for (i = 0; i < gl_thunk_count; i++) sorted[i] = &gl_thunks[i];
+            for (i = 1; i < gl_thunk_count; i++) {           /* insertion sort, once */
+                const struct gl_thunk *t = sorted[i];
+                for (j = i - 1; j >= 0 && strcmp(sorted[j]->name, t->name) > 0; j--) sorted[j + 1] = sorted[j];
+                sorted[j + 1] = t;
+            }
+            ns = gl_thunk_count;
+        }
+        lo = 0; hi = ns;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2, c = strcmp(sorted[mid]->name, name);
+            if (!c) return sorted[mid]->fn(cpu);
+            if (c < 0) lo = mid + 1; else hi = mid;
+        }
+    }
+    return 0;
+}
+
+/* ---- SDL 1.2 ---- */
+static int sdl(rt_cpu *cpu, const char *n)
+{
+    if (!strcmp(n, "SDL_Init")) {
+        QueryPerformanceFrequency(&g_freq);
+        QueryPerformanceCounter(&g_t0);
+        klog("SDL_Init(%#x)\n", ARG(0));
+        RET(0);
+    }
+    if (!strcmp(n, "SDL_WasInit")) RET(ARG(0));
+    if (!strcmp(n, "SDL_Quit")) RET(0);
+    if (!strcmp(n, "SDL_GetTicks")) {
+        LARGE_INTEGER t;
+        if (!g_freq.QuadPart) { QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_t0); }
+        QueryPerformanceCounter(&t);
+        RET((uint32_t)((t.QuadPart - g_t0.QuadPart) * 1000 / g_freq.QuadPart));
+    }
+    if (!strcmp(n, "SDL_Delay")) { Sleep(ARG(0)); pump(); RET(0); }
+    if (!strcmp(n, "SDL_GetError") || !strcmp(n, "SDL_Error")) {
+        if (!g_errstr) g_errstr = guest_strdup("unsupported in the recompiled build");
+        RET(g_errstr);
+    }
+    if (!strcmp(n, "SDL_SetError")) RET(0);
+    if (!strcmp(n, "SDL_GL_SetAttribute")) RET(0);
+    if (!strcmp(n, "SDL_SetVideoMode") || !strcmp(n, "SDL_GetVideoSurface")) {
+        if (!strcmp(n, "SDL_SetVideoMode")) {
+            uint32_t w = ARG(0), h = ARG(1), flags = ARG(3);
+            klog("SDL_SetVideoMode(%u, %u, %u, %#x) on thread %lu\n", w, h, ARG(2), flags, GetCurrentThreadId());
+            if (w) g_w = (int)w;
+            if (h) g_h = (int)h;
+            if (create_window(g_w, g_h, (flags & 2) != 0) < 0) RET(0);
+        }
+        if (!g_surface && g_wnd) {
+            /* SDL_Surface (i386): flags, format*, w, h, pitch, pixels ... */
+            g_surface = guest_alloc(64);
+            memset(RT_P(g_surface), 0, 64);
+            wr32(g_surface + 0, 0x2 | 0x40000000u);
+            wr32(g_surface + 8, (uint32_t)g_w);
+            wr32(g_surface + 12, (uint32_t)g_h);
+            wr16(g_surface + 16, (uint16_t)(g_w * 4));
+        }
+        RET(g_surface);
+    }
+    if (!strcmp(n, "SDL_GetVideoInfo")) {
+        static uint32_t vi;
+        if (!vi) {
+            /* SDL_VideoInfo: 2 words of bitfields, video_mem, vfmt*, current_w, current_h */
+            vi = guest_alloc(32);
+            memset(RT_P(vi), 0, 32);
+            wr32(vi + 4, 1u << 9);
+            wr32(vi + 8, 1 << 20);
+            wr32(vi + 16, (uint32_t)GetSystemMetrics(SM_CXSCREEN));
+            wr32(vi + 20, (uint32_t)GetSystemMetrics(SM_CYSCREEN));
+        }
+        RET(vi);
+    }
+    if (!strcmp(n, "SDL_GL_SwapBuffers") || !strcmp(n, "SDL_Flip")) {
+        static unsigned frames;
+        static int shot_every = -1, shots;
+        if (shot_every < 0) shot_every = getenv("JPRT_SHOT_EVERY") ? atoi(getenv("JPRT_SHOT_EVERY")) : 0;
+        if (shot_every > 0 && frames % (unsigned)shot_every == 0 && shots < 64 && g_rc) {
+            /* the game's own back buffer -> BMP (never the screen) */
+            int w = g_w, h = g_h, stride = (w * 3 + 3) & ~3, y;
+            uint8_t *px = malloc((size_t)stride * h);
+            char path[64];
+            FILE *f;
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadBuffer(GL_BACK);
+            glReadPixels(0, 0, w, h, 0x80E0 /* GL_BGR */, GL_UNSIGNED_BYTE, px);
+            snprintf(path, sizeof(path), "frame_%06u.bmp", frames);
+            if ((f = fopen(path, "wb"))) {
+                uint8_t hd[54] = { 'B', 'M' };
+                uint32_t sz = 54 + (uint32_t)stride * h;
+                memcpy(hd + 2, &sz, 4); hd[10] = 54; hd[14] = 40;
+                memcpy(hd + 18, &w, 4); memcpy(hd + 22, &h, 4); hd[26] = 1; hd[28] = 24;
+                fwrite(hd, 1, 54, f);
+                for (y = 0; y < h; y++) fwrite(px + (size_t)y * stride, 1, stride, f);
+                fclose(f);
+                shots++;
+                klog("shot %s\n", path);
+            }
+            free(px);
+        }
+        if (frames < 3)
+            klog("swap on thread %lu (GL context current: %p)\n", GetCurrentThreadId(), (void *)wglGetCurrentContext());
+        if (g_dc) SwapBuffers(g_dc);
+        pump();
+        if ((++frames % 600) == 1) klog("frame %u\n", frames);
+        RET(0);
+    }
+    if (!strcmp(n, "SDL_PollEvent")) {
+        uint32_t ev = ARG(0);
+        pump();
+        if (g_evh == g_evt) RET(0);
+        if (ev) { memcpy(RT_P(ev), g_evq[g_evh], 20); g_evh = (g_evh + 1) % QN; }
+        RET(1);
+    }
+    if (!strcmp(n, "SDL_PushEvent")) { push_event(RT_P(ARG(0))); RET(0); }
+    if (!strcmp(n, "SDL_ShowCursor")) RET(0);
+    if (!strcmp(n, "SDL_WM_SetCaption")) {
+        if (g_wnd && ARG(0)) SetWindowTextA(g_wnd, gstr(ARG(0)));
+        RET(0);
+    }
+    if (!strcmp(n, "SDL_EnableKeyRepeat")) RET(0);
+    if (!strcmp(n, "SDL_GetMouseState")) {
+        if (ARG(0)) wr32(ARG(0), 0);
+        if (ARG(1)) wr32(ARG(1), 0);
+        RET(0);
+    }
+    if (!strcmp(n, "SDL_NumJoysticks")) RET(0);
+    if (!strcmp(n, "SDL_JoystickOpen")) RET(0);
+    if (!strcmp(n, "SDL_JoystickEventState")) RET(0);
+    if (!strcmp(n, "SDL_OpenAudio")) { klog("SDL_OpenAudio: no audio yet (fails)\n"); RET(-1); }
+    if (!strcmp(n, "SDL_PauseAudio") || !strcmp(n, "SDL_CloseAudio") || !strcmp(n, "SDL_LockAudio") ||
+        !strcmp(n, "SDL_UnlockAudio")) RET(0);
+    if (!strcmp(n, "SDL_LoadObject")) {
+        const char *lib = gstr(ARG(0));
+        klog("SDL_LoadObject(%s): host replacement\n", lib ? lib : "(null)");
+        RET(0xf0000f00u);
+    }
+    if (!strcmp(n, "SDL_LoadFunction")) RET(host_thunk_addr(gstr(ARG(1))));
+    if (!strcmp(n, "SDL_UnloadObject")) RET(0);
+    if (!strcmp(n, "SDL_FreeSurface")) RET(0);
+    return 0;
+}
+
+/* ---- entry from host_call ---- */
+int host_impl(rt_cpu *cpu, const char *name)
+{
+    if (!strncmp(name, "SDL_", 4)) return sdl(cpu, name);
+    if (!strcmp(name, "glXGetProcAddressARB") || !strcmp(name, "glXGetProcAddress"))
+        RET(host_thunk_addr(gstr(ARG(0))));
+    if (!strncmp(name, "gl", 2) && name[2] >= 'A' && name[2] <= 'Z') return gl_dispatch(cpu, name);
+    if (!strcmp(name, "gluErrorString")) RET(guest_strdup("GLU error"));
+    if (!strcmp(name, "gluBuild2DMipmaps")) {
+        static HMODULE glu;
+        int (GLAPI_CALL *f)(uint32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *);
+        if (!glu) glu = LoadLibraryA("glu32.dll");
+        f = (void *)GetProcAddress(glu, "gluBuild2DMipmaps");
+        RET(f(ARG(0), (int32_t)ARG(1), (int32_t)ARG(2), (int32_t)ARG(3), ARG(4), ARG(5), GUEST_PTR(ARG(6))));
+    }
+    if (!strcmp(name, "glutBitmapCharacter")) RET(0);
+    if (!strncmp(name, "udev_", 5)) RET(0);       /* no udev: gun/IO discovery finds nothing */
+    if (!strcmp(name, "XOpenDisplay")) RET(0);
+    return 0;
+}

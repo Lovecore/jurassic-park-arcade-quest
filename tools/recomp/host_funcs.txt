@@ -1,0 +1,21 @@
+# Game functions implemented by the runtime (rt/hostgame.c) instead of
+# being lifted: lift.py emits their body as a call to rt_host_fn().
+# Ported from the Linux shim (vr/shim/shim.c, io_emu.c).
+# address   name
+# Sentinel HASP HL client API (statically linked): emulated dongle
+08529650 hasp_login
+085295f0 hasp_logout
+08529550 hasp_encrypt
+085294d0 hasp_decrypt
+08528520 hasp_read
+08528470 hasp_write
+085283d0 hasp_get_size
+08528350 hasp_get_rtc
+08528670 hasp_get_sessioninfo
+085282a0 hasp_free
+# Raw Thrills RIO I/O board (USB): connected, nothing pressed
+0836b128 RIO_Connect
+0836b1ed RIO_ConnectEx
+0836b2a6 RIO_Disconnect
+0836b33a RIO_SendReport
+0836b4bd RIO_GetReport

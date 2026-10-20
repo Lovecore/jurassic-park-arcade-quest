@@ -38,3 +38,12 @@ vr/box64/out/
 vr/box64/*.log
 vr/ghidra/*.out
 vr/ghidra/*.log
+
+# Windows PC (2026-10-20): transferred dump archives, analysis bundle,
+# external tools downloaded into the repo dir (never C:)
+/Jurassic Park*.zip
+/jp2015-analysis-items/
+/jp2015-analysis-items.zip
+/ext/
+vr/win/out/
+tools/recomp/out/

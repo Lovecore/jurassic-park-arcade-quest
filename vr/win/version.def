@@ -1,0 +1,19 @@
+LIBRARY version.dll
+EXPORTS
+    GetFileVersionInfoA=GetFileVersionInfoA_thunk
+    GetFileVersionInfoByHandle=GetFileVersionInfoByHandle_thunk
+    GetFileVersionInfoExA=GetFileVersionInfoExA_thunk
+    GetFileVersionInfoExW=GetFileVersionInfoExW_thunk
+    GetFileVersionInfoSizeA=GetFileVersionInfoSizeA_thunk
+    GetFileVersionInfoSizeExA=GetFileVersionInfoSizeExA_thunk
+    GetFileVersionInfoSizeExW=GetFileVersionInfoSizeExW_thunk
+    GetFileVersionInfoSizeW=GetFileVersionInfoSizeW_thunk
+    GetFileVersionInfoW=GetFileVersionInfoW_thunk
+    VerFindFileA=VerFindFileA_thunk
+    VerFindFileW=VerFindFileW_thunk
+    VerInstallFileA=VerInstallFileA_thunk
+    VerInstallFileW=VerInstallFileW_thunk
+    VerLanguageNameA=VerLanguageNameA_thunk
+    VerLanguageNameW=VerLanguageNameW_thunk
+    VerQueryValueA=VerQueryValueA_thunk
+    VerQueryValueW=VerQueryValueW_thunk

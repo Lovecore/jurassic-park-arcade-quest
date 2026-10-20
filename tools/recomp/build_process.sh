@@ -1,0 +1,37 @@
+#!/bin/sh
+# Builds the recompiled arcade process for Windows x64 (dev host):
+#   1. lifts the game + i386 libraries (functions.json from discover.py)
+#   2. compiles the generated C and the runtime (rt/) with llvm-mingw
+#   -> tools/recomp/out/process/jp2015.exe
+# Run: JPRT_LIBDIR=ext/debs tools/recomp/out/process/jp2015.exe [-v] "<game dir>"
+set -eu
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+O="$HERE/out"
+TC=${TOOLCHAIN:-$(ls -d "$ROOT"/ext/llvm-mingw-*/bin | tail -1)}
+CC="$TC/x86_64-w64-mingw32-clang"
+PY="$ROOT/.venv/Scripts/python"
+[ -x "$PY" ] || PY=python
+export JP2015_GAME=${JP2015_GAME:-$ROOT/jp2015-analysis-items/jp2015-analysis}
+if [ "${NOLIFT:-}" != 1 ]; then
+    "$PY" "$HERE/lift.py" --out "$O/c_all" --functions "$O/functions.json" \
+        "$O/ld-2.19.so.functions.json" "$O/libc-2.19.so.functions.json" "$O/libdl-2.19.so.functions.json" \
+        "$O/libgcc_s.so.1.functions.json" "$O/libm-2.19.so.functions.json" \
+        "$O/libpthread-2.19.so.functions.json" "$O/librt-2.19.so.functions.json" \
+        "$O/libstdc++.so.6.0.19.functions.json" "$O/libogg.so.0.8.1.functions.json"         "$O/libtheora.so.0.3.10.functions.json" "$O/libnss_files-2.19.so.functions.json" | head -1
+fi
+P="$O/process"
+mkdir -p "$P/obj"
+CFLAGS="${EXTRA_CFLAGS:-} -O1 -w -fno-strict-aliasing -I$HERE/rt -I$O/c_all"
+ls "$O"/c_all/lifted_*.c "$O/c_all/table.c" "$O/c_all/thunks.c" | xargs -P "${JOBS:-16}" -I{} sh -c '
+    o="'"$P"'/obj/$(basename {} .c).o"
+    [ "$o" -nt {} ] && [ "$o" -nt "'"$HERE/rt/rt.h"'" ] || '"$CC $CFLAGS"' -c {} -o "$o"'
+# objects of modules no longer lifted
+for o in "$P"/obj/lifted_*.o; do [ -e "$O/c_all/$(basename "$o" .o).c" ] || rm -f "$o"; done
+"$PY" "$HERE/gen_gl.py" "$ROOT/ext/khronos/gl.xml" -o "$O/gl_thunks.c" > /dev/null
+"$CC" -O1 -w -I"$HERE/rt" -c "$O/gl_thunks.c" -o "$P/obj/rt_gl_thunks.o"
+for s in kernel syscalls hostlibs hostgame; do
+    "$CC" -O1 -g -Wall -Wno-unused-function -I"$HERE/rt" -c "$HERE/rt/$s.c" -o "$P/obj/rt_$s.o"
+done
+"$CC" -o "$P/jp2015.exe" "$P"/obj/*.o -lsynchronization -lopengl32 -lgdi32 -luser32 -Wl,--stack,67108864
+echo "built $P/jp2015.exe"
