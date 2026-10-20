@@ -16,12 +16,12 @@
  *   env: JPRT_LIBDIR (dir with the i386 libs, default ext/debs layout),
  *        JPRT_LOG (log file, default jprt.log)
  */
-#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rt.h"
 #include "kernel.h"
+#include "plat.h"
 
 uint8_t *RT_MEM;
 
@@ -34,12 +34,12 @@ extern const struct { uint32_t addr; const char *name; } rt_thunk_table[];
 /* ---- logging ---- */
 static FILE *g_log;
 int g_verbose;
-static CRITICAL_SECTION g_log_cs;
+static plat_mutex g_log_cs;
 
 void klog(const char *fmt, ...)
 {
     va_list ap;
-    EnterCriticalSection(&g_log_cs);
+    plat_mutex_lock(&g_log_cs);
     va_start(ap, fmt);
     if (g_log) { vfprintf(g_log, fmt, ap); fflush(g_log); }
     va_end(ap);
@@ -48,7 +48,7 @@ void klog(const char *fmt, ...)
         vfprintf(stderr, fmt, ap);
         va_end(ap);
     }
-    LeaveCriticalSection(&g_log_cs);
+    plat_mutex_unlock(&g_log_cs);
 }
 
 void kfatal(rt_cpu *cpu, const char *fmt, ...)
@@ -85,7 +85,7 @@ void kfatal(rt_cpu *cpu, const char *fmt, ...)
 /* ---- guest memory ---- */
 #define NPAGES (1u << 20)
 static uint8_t g_page[NPAGES];          /* 1 = mapped */
-static CRITICAL_SECTION g_mem_cs;
+static plat_mutex g_mem_cs;
 
 int mem_ok(uint32_t a, uint32_t len)
 {
@@ -113,42 +113,42 @@ int mem_map(uint32_t a, uint32_t len)
     if (g_verbose && len >= 0x10000) klog("mem_map(%08x, %#x)\n", a, len);
     uint32_t lo = a & ~0xfffu, hi = (uint32_t)(((uint64_t)a + len + 0xfff) & ~0xfffull), p;
     if (hi <= lo) return -1;
-    EnterCriticalSection(&g_mem_cs);
-    if (!VirtualAlloc(RT_MEM + lo, hi - lo, MEM_COMMIT, PAGE_READWRITE)) {
-        LeaveCriticalSection(&g_mem_cs);
+    plat_mutex_lock(&g_mem_cs);
+    if (plat_commit(RT_MEM + lo, hi - lo) < 0) {
+        plat_mutex_unlock(&g_mem_cs);
         return -1;
     }
     for (p = lo >> 12; p < hi >> 12; p++) {
         if (g_page[p]) memset(RT_MEM + ((uint64_t)p << 12), 0, 4096);
         g_page[p] = 1;
     }
-    LeaveCriticalSection(&g_mem_cs);
+    plat_mutex_unlock(&g_mem_cs);
     return 0;
 }
 
 void mem_unmap(uint32_t a, uint32_t len)
 {
     uint32_t p, lo = a & ~0xfffu, hi = (uint32_t)(((uint64_t)a + len + 0xfff) >> 12);
-    EnterCriticalSection(&g_mem_cs);
+    plat_mutex_lock(&g_mem_cs);
     for (p = lo >> 12; p < hi; p++)
         g_page[p] = 0;
     /* decommit: a later mmap must see zero pages, as on Linux (glibc relies
      * on it, e.g. prev_size of mmapped malloc chunks) */
     if (hi > (lo >> 12))
-        VirtualFree(RT_MEM + lo, ((uint64_t)hi << 12) - lo, MEM_DECOMMIT);
-    LeaveCriticalSection(&g_mem_cs);
+        plat_decommit(RT_MEM + lo, ((uint64_t)hi << 12) - lo);
+    plat_mutex_unlock(&g_mem_cs);
 }
 
 /* Highest free run of len bytes below top (top-down like Linux mmap). */
 uint32_t mem_find(uint32_t len, uint32_t top)
 {
     uint32_t n = (len + 0xfff) >> 12, run = 0, p;
-    EnterCriticalSection(&g_mem_cs);
+    plat_mutex_lock(&g_mem_cs);
     for (p = top >> 12; p > 0x100; p--) {
         if (g_page[p - 1]) { run = 0; continue; }
-        if (++run == n) { LeaveCriticalSection(&g_mem_cs); return (p - 1) << 12; }
+        if (++run == n) { plat_mutex_unlock(&g_mem_cs); return (p - 1) << 12; }
     }
-    LeaveCriticalSection(&g_mem_cs);
+    plat_mutex_unlock(&g_mem_cs);
     return 0;
 }
 
@@ -396,9 +396,7 @@ void rt_cpuid(rt_cpu *cpu)
 
 uint64_t rt_rdtsc(void)
 {
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return (uint64_t)t.QuadPart;
+    return plat_mono_ns();
 }
 
 /* ---- initial stack (System V i386 ABI, like Linux execve) ---- */
@@ -451,33 +449,20 @@ uint32_t g_brk_start, g_brk;
 
 /* Host exceptions (an access to unmapped guest memory shows up as an access
  * violation inside the 4 GB reservation): report the guest address. */
-static void host_backtrace(void)
-{
-    void *frames[48];
-    USHORT n = RtlCaptureStackBackTrace(1, 48, frames, NULL), i;
-    for (i = 0; i < n; i++) {
-        HMODULE m = NULL;
-        char name[MAX_PATH] = "?";
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR)frames[i], &m);
-        if (m) GetModuleFileNameA(m, name, MAX_PATH);
-        klog("  host frame %2u: %s+%#llx\n", i, strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name,
-             (unsigned long long)((uintptr_t)frames[i] - (uintptr_t)m));
-    }
-}
+static void bt_line(const char *l) { klog("%s", l); }
+static void host_backtrace(void) { plat_backtrace(bt_line); }
 
 /* Debug write watchpoint (JPRT_WATCH=<guest addr>): the page is read-only;
  * each write faults, is logged with its host pc (symbolize.py maps it to the
  * guest instruction), then single-stepped with the page writable. */
 static uint32_t g_watch, g_watch_page;
-static volatile LONG g_watch_hits;
+static int32_t g_watch_hits;
 
 static int g_watch_armed;
 
 static void watch_arm(void)
 {
-    DWORD old;
-    VirtualProtect(RT_MEM + g_watch_page, 4096, PAGE_READONLY, &old);
+    plat_protect(RT_MEM + g_watch_page, 4096, 0);
 }
 
 /* called on every syscall: arm the watchpoint once its page is mapped */
@@ -490,57 +475,52 @@ void watch_poll(void)
     }
 }
 
-static LONG CALLBACK host_fault(EXCEPTION_POINTERS *ep)
+static int host_fault(int kind, uintptr_t a, int write, void *pc)
 {
-    EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    uintptr_t base = (uintptr_t)RT_MEM;
     if (g_watch) {
-        if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2 &&
-            er->ExceptionInformation[0] == 1) {
-            uint64_t a = er->ExceptionInformation[1] - (uint64_t)(uintptr_t)RT_MEM;
-            if (a >= g_watch_page && a < g_watch_page + 4096u) {
-                DWORD old;
-                if (a >= g_watch && a < g_watch + 4u && InterlockedIncrement(&g_watch_hits) < 64) {
-                    klog("WATCH write to %08x (value before %08x) at host pc %p\n", (uint32_t)a,
-                         rd32(g_watch), er->ExceptionAddress);
-                    host_backtrace();
-                }
-                VirtualProtect(RT_MEM + g_watch_page, 4096, PAGE_READWRITE, &old);
-                ep->ContextRecord->EFlags |= 0x100;      /* single-step the write */
-                return EXCEPTION_CONTINUE_EXECUTION;
+        if (kind == PLAT_FAULT_ACCESS && write && a >= base + g_watch_page && a < base + g_watch_page + 4096u) {
+            uint32_t ga = (uint32_t)(a - base);
+            if (ga >= g_watch && ga < g_watch + 4u && plat_atomic_inc(&g_watch_hits) < 64) {
+                klog("WATCH write to %08x (value before %08x) at host pc %p\n", ga, rd32(g_watch), pc);
+                host_backtrace();
             }
+            plat_protect(RT_MEM + g_watch_page, 4096, 1);
+            return 2;                                    /* single-step the write, then re-arm */
         }
-        if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch_armed) {
+        if (kind == PLAT_FAULT_STEP && g_watch_armed) {
             watch_arm();
-            return EXCEPTION_CONTINUE_EXECUTION;
+            return 1;
         }
     }
-    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || er->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    if (kind == PLAT_FAULT_ACCESS || kind == PLAT_FAULT_STACK)
         host_backtrace();
-    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
-        uint64_t a = er->ExceptionInformation[1];
-        if (a >= (uint64_t)(uintptr_t)RT_MEM && a < (uint64_t)(uintptr_t)RT_MEM + (1ull << 32))
-            kfatal(current_cpu(), "guest %s of unmapped address %08x (host rip %p)",
-                   er->ExceptionInformation[0] ? "write" : "read",
-                   (uint32_t)(a - (uint64_t)(uintptr_t)RT_MEM), er->ExceptionAddress);
-        kfatal(current_cpu(), "host access violation at %p (address %p)", er->ExceptionAddress, (void *)(uintptr_t)a);
+    if (kind == PLAT_FAULT_ACCESS) {
+        if (a >= base && a < base + (1ull << 32))
+            kfatal(current_cpu(), "guest %s of unmapped address %08x (host pc %p)",
+                   write ? "write" : "access", (uint32_t)(a - base), pc);
+        kfatal(current_cpu(), "host access violation at %p (address %p)", pc, (void *)a);
     }
-    if (er->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+    if (kind == PLAT_FAULT_STACK)
         kfatal(NULL, "host stack overflow (runaway guest recursion?)");
-    if (er->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO)
-        kfatal(NULL, "host divide by zero at %p", er->ExceptionAddress);
-    return EXCEPTION_CONTINUE_SEARCH;
+    if (kind == PLAT_FAULT_DIV0)
+        kfatal(NULL, "host divide by zero at %p", pc);
+    if (kind == PLAT_FAULT_OTHER)
+        kfatal(current_cpu(), "host fault (illegal instruction?) at %p", pc);
+    return 0;
 }
 
-int main(int argc, char **argv)
+int jprt_main(int argc, char **argv)
 {
     int ai = 1;
     elf_info game, ld;
     char path[1024];
     rt_cpu *cpu;
 
-    InitializeCriticalSection(&g_log_cs);
-    InitializeCriticalSection(&g_mem_cs);
-    AddVectoredExceptionHandler(1, host_fault);
+    plat_mutex_init(&g_log_cs);
+    plat_mutex_init(&g_mem_cs);
+    plat_install_fault_handler(host_fault);
+    plat_guest_thread_init();
     if (ai < argc && !strcmp(argv[ai], "-v")) { g_verbose = 1; ai++; }
     if (ai >= argc) {
         fprintf(stderr, "usage: %s [-v] <game dir> [game args...]\n", argv[0]);
@@ -549,7 +529,7 @@ int main(int argc, char **argv)
     g_log = fopen(getenv("JPRT_LOG") ? getenv("JPRT_LOG") : "jprt.log", "w");
     vfs_init(argv[ai]);
 
-    RT_MEM = VirtualAlloc(NULL, 1ull << 32, MEM_RESERVE, PAGE_NOACCESS);
+    RT_MEM = plat_reserve(1ull << 32);
     if (!RT_MEM) { fprintf(stderr, "cannot reserve 4 GB guest space\n"); return 1; }
     klog("guest memory at %p\n", RT_MEM);
     host_heap_init();
@@ -586,3 +566,7 @@ int main(int argc, char **argv)
     run_guest(cpu, ld.entry, 0);
     return 0;
 }
+
+#if !defined(JPRT_NO_MAIN)
+int main(int argc, char **argv) { return jprt_main(argc, argv); }
+#endif

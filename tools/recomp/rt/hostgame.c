@@ -16,13 +16,13 @@
  *
  * Called with the guest stack as on i386 ([esp] = return address).
  */
-#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "rt.h"
 #include "kernel.h"
+#include "plat.h"
 
 #define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
 #define RET(v) do { cpu->eax = (uint32_t)(v); cpu->esp += 4; return; } while (0)
@@ -34,7 +34,7 @@ uint32_t guest_strdup(const char *s);
 #define HASP_MEM_SIZE 4096
 static uint8_t g_hasp_mem[4][HASP_MEM_SIZE];
 static char g_hasp_path[1100];
-static CRITICAL_SECTION g_hasp_cs;
+static plat_mutex g_hasp_cs;
 
 static int hasp_file_index(uint32_t fileid)
 {
@@ -60,37 +60,36 @@ static uint64_t fnv1a64(const uint8_t *p, size_t n)
 
 static void index_dir(const char *enc, const char *dec)
 {
-    WIN32_FIND_DATAA fd;
-    char pat[1200];
-    HANDLE h;
-    snprintf(pat, sizeof(pat), "%s\\*", enc);
-    h = FindFirstFileA(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
+    plat_dir *dir = plat_opendir(enc);
+    const char *name;
+    int is_dir;
+    if (!dir) return;
+    while ((name = plat_readdir(dir, &is_dir))) {
         char e[1200], d[1200];
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        snprintf(e, sizeof(e), "%s\\%s", enc, fd.cFileName);
-        snprintf(d, sizeof(d), "%s\\%s", dec, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        snprintf(e, sizeof(e), "%s/%s", enc, name);
+        snprintf(d, sizeof(d), "%s/%s", dec, name);
+        if (is_dir) {
             index_dir(e, d);
-        } else if (fd.nFileSizeLow) {
+        } else {
             FILE *f = fopen(e, "rb");
-            uint8_t *b = malloc(fd.nFileSizeLow);
-            if (f && b && fread(b, 1, fd.nFileSizeLow, f) == fd.nFileSizeLow) {
+            long n = 0;
+            uint8_t *b = NULL;
+            if (f) { fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET); }
+            if (f && n > 0 && (b = malloc((size_t)n)) && fread(b, 1, (size_t)n, f) == (size_t)n) {
                 if (g_ncipher == g_ccap) {
                     g_ccap = g_ccap ? 2 * g_ccap : 2048;
                     g_cipher = realloc(g_cipher, g_ccap * sizeof(*g_cipher));
                 }
-                g_cipher[g_ncipher].len = fd.nFileSizeLow;
-                g_cipher[g_ncipher].hash = fnv1a64(b, fd.nFileSizeLow);
-                g_cipher[g_ncipher].plain = _strdup(d);
+                g_cipher[g_ncipher].len = (uint32_t)n;
+                g_cipher[g_ncipher].hash = fnv1a64(b, (size_t)n);
+                g_cipher[g_ncipher].plain = strdup(d);
                 g_ncipher++;
             }
             if (f) fclose(f);
             free(b);
         }
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+    }
+    plat_closedir(dir);
 }
 
 static void hasp_init(void)
@@ -101,7 +100,7 @@ static void hasp_init(void)
     uint8_t *main_mem;
     if (done) return;
     done = 1;
-    InitializeCriticalSection(&g_hasp_cs);
+    plat_mutex_init(&g_hasp_cs);
     vfs_host_path("/pm/pmuser/hasp_mem.bin", g_hasp_path, sizeof(g_hasp_path));
     if ((f = fopen(g_hasp_path, "rb"))) {
         size_t n = fread(g_hasp_mem, 1, sizeof(g_hasp_mem), f);
@@ -169,10 +168,10 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
         uint32_t fileid = ARG(1), off = ARG(2), len = ARG(3), buf = ARG(4);
         uint8_t *m = g_hasp_mem[hasp_file_index(fileid)];
         if (!buf || off > HASP_MEM_SIZE || len > HASP_MEM_SIZE - off) RET(9);   /* HASP_MEM_RANGE */
-        EnterCriticalSection(&g_hasp_cs);
+        plat_mutex_lock(&g_hasp_cs);
         if (addr == 0x8528520) memcpy(RT_P(buf), m + off, len);
         else { memcpy(m + off, RT_P(buf), len); hasp_save(); }
-        LeaveCriticalSection(&g_hasp_cs);
+        plat_mutex_unlock(&g_hasp_cs);
         RET(0);
     }
     case 0x85283d0: if (ARG(2)) wr32(ARG(2), HASP_MEM_SIZE); RET(0);   /* hasp_get_size */

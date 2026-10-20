@@ -8,20 +8,21 @@
  * The device callback (SDL_mixer's mix_channels) is guest code. Rather
  * than run it on a host-created thread (no guest TLS/stack there), the
  * game's own threads pump it: SDL_GL_SwapBuffers, SDL_Delay and
- * SDL_PollEvent call audio_pump(), which refills the finished waveOut
- * buffers by calling the guest callback under the audio lock.
+ * SDL_PollEvent call audio_pump(), which refills the output device
+ * (audiodev.c: waveOut / AAudio) by calling the guest callback under the
+ * audio lock.
  *
  * Buffers that SDL would have malloc'ed (LoadWAV) come from the guest's
  * own libc malloc, since SDL_mixer frees them with SDL_free.
  */
-#include <windows.h>
-#include <mmsystem.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rt.h"
 #include "kernel.h"
+#include "plat.h"
+#include "audiodev.h"
 
 #define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
 #define RET(v) do { cpu->eax = (uint32_t)(v); cpu->esp += 4; return 1; } while (0)
@@ -108,12 +109,12 @@ static void gfree(rt_cpu *cpu, uint32_t p)
 #define RW_MAGIC 0x4a505254u            /* type field of our RWops */
 #define NRW 64
 static struct { FILE *f; uint32_t g; } g_rw[NRW];
-static CRITICAL_SECTION g_rw_cs, g_audio_cs;
+static plat_mutex g_rw_cs, g_audio_cs;
 
 __attribute__((constructor)) static void audio_cs_init(void)
 {
-    InitializeCriticalSection(&g_rw_cs);
-    InitializeCriticalSection(&g_audio_cs);
+    plat_mutex_init(&g_rw_cs);
+    plat_mutex_init(&g_audio_cs);
 }
 
 static int rw_slot(uint32_t rw)
@@ -133,7 +134,7 @@ static uint32_t rw_open(rt_cpu *cpu, const char *gpath, const char *mode)
     (void)cpu;
     snprintf(m, sizeof(m), "%s%s", mode, strchr(mode, 'b') ? "" : "b");
     if (!vfs_host_path(gpath, host, sizeof(host)) || !(f = fopen(host, m))) return 0;
-    EnterCriticalSection(&g_rw_cs);
+    plat_mutex_lock(&g_rw_cs);
     for (i = 0; i < NRW && g_rw[i].f; i++) ;
     if (i < NRW) {
         if (!g_rw[i].g) g_rw[i].g = guest_alloc(32);
@@ -147,17 +148,17 @@ static uint32_t rw_open(rt_cpu *cpu, const char *gpath, const char *mode)
         wr32(rw + 20, (uint32_t)i);
     } else
         fclose(f);
-    LeaveCriticalSection(&g_rw_cs);
+    plat_mutex_unlock(&g_rw_cs);
     if (!rw) klog("SDL_RWFromFile: too many open RWops\n");
     return rw;
 }
 
 static void rw_release(int i)
 {
-    EnterCriticalSection(&g_rw_cs);
+    plat_mutex_lock(&g_rw_cs);
     if (g_rw[i].f) fclose(g_rw[i].f);
     g_rw[i].f = NULL;
-    LeaveCriticalSection(&g_rw_cs);
+    plat_mutex_unlock(&g_rw_cs);
 }
 
 /* read n bytes from any RWops (ours directly, the guest's through its read) */
@@ -345,65 +346,50 @@ static int convert(uint32_t cvt)
     return 0;
 }
 
-/* ---- device: winmm waveOut, pumped by the game's threads ---- */
-#define NHDR 16
-static HWAVEOUT g_wo;
-static WAVEHDR g_hdr[NHDR];
+/* ---- device (audiodev.c), pumped by the game's threads ---- */
 static int g_nbuf = 6, g_open, g_paused = 1;
 static uint32_t g_cb, g_ud, g_stream, g_chunk;  /* guest callback, userdata, stream buffer, bytes */
 static uint16_t g_fmt;
 static uint8_t g_silence;
-static volatile LONG g_pumping;
+static int32_t g_pumping;
+static uint8_t *g_out;
 static FILE *g_dump;              /* JPRT_AUDIO_DUMP=file: raw PCM of everything played */
 
 static int open_audio(rt_cpu *cpu, uint32_t want, uint32_t have)
 {
-    WAVEFORMATEX wf;
-    uint32_t freq = rd32(want), frames;
+    uint32_t freq = rd32(want), frames, block;
     uint16_t fmt = rd16(want + 4);
     uint8_t ch = rd8(want + 6);
-    int i;
     (void)cpu;
     if (g_open) return -1;
     if (getenv("JPRT_AUDIO") && !atoi(getenv("JPRT_AUDIO"))) return -1;
     if (getenv("JPRT_AUDIO_BUFS")) g_nbuf = atoi(getenv("JPRT_AUDIO_BUFS"));
     if (g_nbuf < 2) g_nbuf = 2;
-    if (g_nbuf > NHDR) g_nbuf = NHDR;
+    if (g_nbuf > 16) g_nbuf = 16;
     if (fmt != AUDIO_U8) fmt = AUDIO_S16LSB;
     if (ch < 1) ch = 1;
     if (ch > 2) ch = 2;
     if (!freq) freq = 44100;
     frames = 512;                        /* our pump granularity, independent of the spec's samples */
-    memset(&wf, 0, sizeof(wf));
-    wf.wFormatTag = WAVE_FORMAT_PCM;
-    wf.nChannels = ch;
-    wf.nSamplesPerSec = freq;
-    wf.wBitsPerSample = fmt == AUDIO_U8 ? 8 : 16;
-    wf.nBlockAlign = (WORD)(ch * wf.wBitsPerSample / 8);
-    wf.nAvgBytesPerSec = freq * wf.nBlockAlign;
-    if (waveOutOpen(&g_wo, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        klog("SDL_OpenAudio: waveOutOpen failed\n");
+    block = (uint32_t)ch * (fmt == AUDIO_U8 ? 1 : 2);
+    g_chunk = frames * block;
+    if (adev_open(freq, ch, fmt == AUDIO_U8 ? 8 : 16, g_chunk, g_nbuf) < 0) {
+        klog("SDL_OpenAudio: no output device\n");
         return -1;
     }
     g_fmt = fmt;
     g_silence = fmt == AUDIO_U8 ? 0x80 : 0;
-    g_chunk = frames * wf.nBlockAlign;
     g_cb = rd32(want + 16);
     g_ud = rd32(want + 20);
     if (!g_stream) g_stream = guest_alloc(64 * 1024);
-    for (i = 0; i < g_nbuf; i++) {
-        memset(&g_hdr[i], 0, sizeof(g_hdr[i]));
-        g_hdr[i].lpData = malloc(g_chunk);
-        g_hdr[i].dwBufferLength = g_chunk;
-        g_hdr[i].dwFlags = WHDR_DONE;    /* free for the pump */
-    }
+    g_out = malloc(g_chunk);
     if (!have) have = want;              /* SDL 1.2: NULL obtained = desired is guaranteed */
     if (have != want) memcpy(RT_P(have), RT_P(want), 24);
     wr32(have + 0, freq);
     wr16(have + 4, fmt);
     wr8(have + 6, ch);
     wr8(have + 7, g_silence);
-    wr32(have + 12, (uint32_t)rd16(have + 8) * wf.nBlockAlign);
+    wr32(have + 12, (uint32_t)rd16(have + 8) * block);
     if (getenv("JPRT_AUDIO_DUMP")) g_dump = fopen(getenv("JPRT_AUDIO_DUMP"), "wb");
     g_paused = 1;
     g_open = 1;
@@ -414,49 +400,39 @@ static int open_audio(rt_cpu *cpu, uint32_t want, uint32_t have)
 
 void audio_pump(rt_cpu *cpu)
 {
-    int i;
-    if (!g_open || InterlockedCompareExchange(&g_pumping, 1, 0)) return;
-    for (i = 0; i < g_nbuf; i++) {
-        WAVEHDR *h = &g_hdr[i];
-        if (!(h->dwFlags & WHDR_DONE)) continue;
-        if (h->dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_wo, h, sizeof(*h));
-        EnterCriticalSection(&g_audio_cs);
+    int n;
+    if (!g_open || !plat_atomic_cas(&g_pumping, 0, 1)) return;
+    for (n = adev_free_chunks(); n > 0; n--) {
+        plat_mutex_lock(&g_audio_cs);
         memset(RT_P(g_stream), g_silence, g_chunk);
         if (!g_paused && g_cb) {
             uint32_t a[3] = { g_ud, g_stream, g_chunk };
             guest_call(cpu, g_cb, 3, a);
         }
-        memcpy(h->lpData, RT_P(g_stream), g_chunk);
-        LeaveCriticalSection(&g_audio_cs);
-        if (g_dump) fwrite(h->lpData, 1, g_chunk, g_dump);
+        memcpy(g_out, RT_P(g_stream), g_chunk);
+        plat_mutex_unlock(&g_audio_cs);
+        if (g_dump) fwrite(g_out, 1, g_chunk, g_dump);
         if (g_fmt == AUDIO_S16LSB) {     /* level log: proves the mixer produces sound */
             static unsigned nchunks, peak;
             uint32_t k;
             for (k = 0; k + 1 < g_chunk; k += 2) {
-                int v = abs((int16_t)(((uint8_t *)h->lpData)[k] | ((uint8_t *)h->lpData)[k + 1] << 8));
+                int v = abs((int16_t)(g_out[k] | g_out[k + 1] << 8));
                 if ((unsigned)v > peak) peak = (unsigned)v;
             }
             if (++nchunks % 430 == 0) { klog("audio: %u chunks, peak %u\n", nchunks, peak); peak = 0; }
         }
-        h->dwFlags = 0;
-        waveOutPrepareHeader(g_wo, h, sizeof(*h));
-        waveOutWrite(g_wo, h, sizeof(*h));
+        adev_submit(g_out);
     }
-    InterlockedExchange(&g_pumping, 0);
+    plat_atomic_xchg(&g_pumping, 0);
 }
 
 static void close_audio(void)
 {
-    int i;
     if (!g_open) return;
     g_open = 0;
-    waveOutReset(g_wo);
-    for (i = 0; i < g_nbuf; i++) {
-        if (g_hdr[i].dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(g_wo, &g_hdr[i], sizeof(g_hdr[i]));
-        free(g_hdr[i].lpData);
-        g_hdr[i].lpData = NULL;
-    }
-    waveOutClose(g_wo);
+    adev_close();
+    free(g_out);
+    g_out = NULL;
 }
 
 static void mix_audio(uint32_t dst, uint32_t src, uint32_t len, int vol)
@@ -487,8 +463,8 @@ int sdl_audio(rt_cpu *cpu, const char *n)
     if (!strcmp(n, "SDL_OpenAudio")) RET(open_audio(cpu, ARG(0), ARG(1)));
     if (!strcmp(n, "SDL_PauseAudio")) { g_paused = ARG(0) != 0; audio_pump(cpu); RET(0); }
     if (!strcmp(n, "SDL_CloseAudio")) { close_audio(); RET(0); }
-    if (!strcmp(n, "SDL_LockAudio")) { EnterCriticalSection(&g_audio_cs); RET(0); }
-    if (!strcmp(n, "SDL_UnlockAudio")) { LeaveCriticalSection(&g_audio_cs); RET(0); }
+    if (!strcmp(n, "SDL_LockAudio")) { plat_mutex_lock(&g_audio_cs); RET(0); }
+    if (!strcmp(n, "SDL_UnlockAudio")) { plat_mutex_unlock(&g_audio_cs); RET(0); }
     if (!strcmp(n, "SDL_GetAudioStatus")) RET(!g_open ? 0 : g_paused ? 2 : 1);
     if (!strcmp(n, "SDL_MixAudio")) { mix_audio(ARG(0), ARG(1), ARG(2), (int)ARG(3)); RET(0); }
     if (!strcmp(n, "SDL_BuildAudioCVT"))

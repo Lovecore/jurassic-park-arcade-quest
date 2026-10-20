@@ -5,17 +5,20 @@
  *
  * Errors follow Linux: return -errno in eax.
  */
-#include <windows.h>
-#include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <direct.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sched.h>
 #include "rt.h"
 #include "kernel.h"
+#include "plat.h"
+
+#if !defined(_WIN32)
+#define strtok_s strtok_r
+#endif
 
 enum { L_EPERM = 1, L_ENOENT = 2, L_EINTR = 4, L_EIO = 5, L_EBADF = 9, L_EAGAIN = 11, L_ENOMEM = 12,
        L_EACCES = 13, L_EFAULT = 14, L_EEXIST = 17, L_ENOTDIR = 20, L_EISDIR = 21, L_EINVAL = 22,
@@ -67,7 +70,7 @@ static const struct { const char *file; uint32_t base; } LIBBASE[] = {
     { "libNxCooking.so", 0xa0400000u }, { "libNxCharacter.so.1", 0xa0500000u }, { NULL, 0 }
 };
 
-static int host_exists(const char *p) { return _access(p, 0) == 0; }
+static int host_exists(const char *p) { return p_access(p, 0) == 0; }
 
 /* /etc files the guest libc reads: NSS limited to `files` (only
  * libnss_files is lifted), the arcade ran as root */
@@ -89,7 +92,7 @@ static void write_etc_files(void)
     int i;
     for (i = 0; i < (int)(sizeof(dirs) / sizeof(dirs[0])); i++) {
         snprintf(p, sizeof(p), "%s/%s", g_root_dir, dirs[i]);
-        _mkdir(p);
+        p_mkdir(p);
     }
     for (i = 0; i < 5; i++) {
         FILE *f;
@@ -102,13 +105,12 @@ void vfs_init(const char *game_dir)
 {
     const char *libdir = getenv("JPRT_LIBDIR");
     const char *root = getenv("JPRT_ROOT");
-    char exe[MAX_PATH], *s;
-    GetModuleFileNameA(NULL, exe, MAX_PATH);
-    if ((s = strrchr(exe, '\\'))) *s = 0;
+    char exe[1024];
+    plat_exe_dir(exe, sizeof(exe));
     snprintf(g_game_dir, sizeof(g_game_dir), "%s", game_dir);
     if (root) snprintf(g_root_dir, sizeof(g_root_dir), "%s", root);
-    else snprintf(g_root_dir, sizeof(g_root_dir), "%s\\rootfs", exe);
-    _mkdir(g_root_dir);
+    else snprintf(g_root_dir, sizeof(g_root_dir), "%s/rootfs", exe);
+    p_mkdir(g_root_dir);
     if (!libdir) libdir = "ext/debs";
     snprintf(g_lib_dirs[0], 1024, "%s/x_libc6_2.19-0ubuntu6.6_i386/lib/i386-linux-gnu", libdir);
     snprintf(g_lib_dirs[1], 1024, "%s/x_libgcc1_4.9-20140406-0ubuntu1_i386/lib/i386-linux-gnu", libdir);
@@ -119,6 +121,10 @@ void vfs_init(const char *game_dir)
     if (getenv("JPRT_TPLIBS")) snprintf(g_lib_dirs[5], 1024, "%s", getenv("JPRT_TPLIBS"));
     else snprintf(g_lib_dirs[5], 1024, "%s/../TeknoParrot/ElfLdr2/libs", libdir);
     g_lib_dirs[6][0] = 0;
+    if (getenv("JPRT_LIBS")) {              /* all i386 libraries in one flat dir (the Quest) */
+        snprintf(g_lib_dirs[0], 1024, "%s", getenv("JPRT_LIBS"));
+        g_lib_dirs[1][0] = 0;
+    }
     write_etc_files();
     klog("vfs: /pm -> %s, / -> %s, libs in %s\n", g_game_dir, g_root_dir, libdir);
 }
@@ -172,7 +178,11 @@ int vfs_host_path(const char *guest, char *host, size_t n)
         }
         return 0;
     }
+#if defined(_WIN32)
     if (!strcmp(g, "/dev/null")) { snprintf(host, n, "NUL"); return 1; }
+#else
+    if (!strcmp(g, "/dev/null")) { snprintf(host, n, "/dev/null"); return 1; }
+#endif
     (void)base;
     snprintf(host, n, "%s%s", g_root_dir, g);
     return 1;
@@ -184,11 +194,13 @@ typedef struct {
     int used, hfd, is_dir;
     char gpath[512];
     char hpath[1024];
-    intptr_t find;                 /* directory listing state */
-    int dir_pos;
+    plat_dir *dir;                 /* directory listing state */
+    int dir_done;
+    char pending[256];             /* entry that did not fit the last getdents buffer */
+    int pending_isdir;
 } gfd;
 static gfd g_fd[MAXFD];
-static CRITICAL_SECTION g_fd_cs;
+static plat_mutex g_fd_cs;
 static int g_fd_init;
 
 static void fd_init(void)
@@ -196,7 +208,7 @@ static void fd_init(void)
     int i;
     if (g_fd_init) return;
     g_fd_init = 1;
-    InitializeCriticalSection(&g_fd_cs);
+    plat_mutex_init(&g_fd_cs);
     for (i = 0; i < 3; i++) { g_fd[i].used = 1; g_fd[i].hfd = i; snprintf(g_fd[i].gpath, 512, "<std%d>", i); }
 }
 
@@ -210,11 +222,7 @@ static int fd_alloc(int from)
 
 static gfd *fd_get(uint32_t fd) { return (fd < MAXFD && g_fd[fd].used) ? &g_fd[fd] : NULL; }
 
-static int is_host_dir(const char *p)
-{
-    DWORD a = GetFileAttributesA(p);
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
+static int is_host_dir(const char *p) { return plat_is_dir(p); }
 
 static int sys_open(const char *path, int flags, int mode)
 {
@@ -223,26 +231,26 @@ static int sys_open(const char *path, int flags, int mode)
     if (!path) return -L_EFAULT;
     if (!strcmp(path, "/etc/ld.so.cache") || !strcmp(path, "/etc/ld.so.preload")) return -L_ENOENT;
     if (!vfs_host_path(path, host, sizeof(host))) return -L_ENOENT;
-    EnterCriticalSection(&g_fd_cs);
+    plat_mutex_lock(&g_fd_cs);
     fd = fd_alloc(3);
-    if (fd < 0) { LeaveCriticalSection(&g_fd_cs); return fd; }
+    if (fd < 0) { plat_mutex_unlock(&g_fd_cs); return fd; }
     if (is_host_dir(host)) {
         g_fd[fd].is_dir = 1;
         g_fd[fd].hfd = -1;
     } else {
-        if ((flags & 3) == 0) hf = _O_RDONLY; else if ((flags & 3) == 1) hf = _O_WRONLY; else hf = _O_RDWR;
-        if (flags & 0100) hf |= _O_CREAT;
-        if (flags & 01000) hf |= _O_TRUNC;
-        if (flags & 02000) hf |= _O_APPEND;
-        if (flags & 0200) hf |= _O_EXCL;
-        if (flags & 0200000) { g_fd[fd].used = 0; LeaveCriticalSection(&g_fd_cs); return -L_ENOTDIR; } /* O_DIRECTORY */
-        h = _open(host, hf | _O_BINARY, _S_IREAD | _S_IWRITE);
-        if (h < 0) { int e = errno; g_fd[fd].used = 0; LeaveCriticalSection(&g_fd_cs); return lerrno(e); }
+        if ((flags & 3) == 0) hf = P_O_RDONLY; else if ((flags & 3) == 1) hf = P_O_WRONLY; else hf = P_O_RDWR;
+        if (flags & 0100) hf |= P_O_CREAT;
+        if (flags & 01000) hf |= P_O_TRUNC;
+        if (flags & 02000) hf |= P_O_APPEND;
+        if (flags & 0200) hf |= P_O_EXCL;
+        if (flags & 0200000) { g_fd[fd].used = 0; plat_mutex_unlock(&g_fd_cs); return -L_ENOTDIR; } /* O_DIRECTORY */
+        h = p_open(host, hf, P_MODE);
+        if (h < 0) { int e = errno; g_fd[fd].used = 0; plat_mutex_unlock(&g_fd_cs); return lerrno(e); }
         g_fd[fd].hfd = h;
     }
     snprintf(g_fd[fd].gpath, sizeof(g_fd[fd].gpath), "%s", path);
     snprintf(g_fd[fd].hpath, sizeof(g_fd[fd].hpath), "%s", host);
-    LeaveCriticalSection(&g_fd_cs);
+    plat_mutex_unlock(&g_fd_cs);
     if (g_verbose) klog("open(%s, %#x) = %d [%s]\n", path, flags, fd, host);
     return fd;
 }
@@ -252,8 +260,8 @@ static int sys_close(uint32_t fd)
     gfd *f = fd_get(fd);
     if (!f) return -L_EBADF;
     if (fd < 3) return 0;
-    if (f->hfd >= 0) _close(f->hfd);
-    if (f->find && f->find != -1 && f->find != -2) _findclose(f->find);   /* -2: listing finished */
+    if (f->hfd >= 0) p_close(f->hfd);
+    if (f->dir) plat_closedir(f->dir);
     f->used = 0;
     return 0;
 }
@@ -284,9 +292,9 @@ static uint32_t path_ino(const char *s)
 
 static int stat_host(const char *host, uint32_t buf)
 {
-    struct _stat64 st;
-    if (_stat64(host, &st) < 0) return lerrno(errno);
-    fill_stat64(buf, (st.st_mode & _S_IFDIR) != 0, st.st_size, st.st_mtime, path_ino(host));
+    p_stat_t st;
+    if (p_stat(host, &st) < 0) return lerrno(errno);
+    fill_stat64(buf, P_S_ISDIR(st.st_mode), st.st_size, st.st_mtime, path_ino(host));
     return 0;
 }
 
@@ -309,8 +317,8 @@ static int sys_fstat64(uint32_t fd, uint32_t buf)
     }
     if (f->is_dir) return stat_host(f->hpath, buf);
     {
-        struct _stat64 st;
-        if (_fstat64(f->hfd, &st) < 0) return lerrno(errno);
+        p_stat_t st;
+        if (p_fstat(f->hfd, &st) < 0) return lerrno(errno);
         fill_stat64(buf, 0, st.st_size, st.st_mtime, path_ino(f->hpath));
     }
     return 0;
@@ -319,70 +327,72 @@ static int sys_fstat64(uint32_t fd, uint32_t buf)
 static int sys_getdents(uint32_t fd, uint32_t buf, uint32_t len, int old)
 {
     gfd *f = fd_get(fd);
-    struct _finddata_t fdat;
     uint32_t used = 0;
-    char pat[1100];
     if (!f) return -L_EBADF;
     if (!f->is_dir) return -L_ENOTDIR;
+    if (!f->dir && !f->dir_done) {
+        f->dir = plat_opendir(f->hpath);
+        if (!f->dir) { f->dir_done = 1; return 0; }
+    }
     for (;;) {
-        int r;
-        if (!f->find) {
-            snprintf(pat, sizeof(pat), "%s\\*", f->hpath);
-            f->find = _findfirst(pat, &fdat);
-            if (f->find == -1) { f->find = 0; return 0; }
-            r = 0;
-        } else if (f->find == -2) {
+        const char *name;
+        int isdir = 0;
+        uint32_t nl, rec;
+        if (f->pending[0]) { name = f->pending; isdir = f->pending_isdir; }
+        else {
+            if (f->dir_done) return (int)used;
+            name = plat_readdir(f->dir, &isdir);
+            if (!name) { plat_closedir(f->dir); f->dir = NULL; f->dir_done = 1; return (int)used; }
+        }
+        /* linux_dirent64: ino u64, off s64, reclen u16, type u8, name
+         * linux_dirent (old): ino u32, off u32, reclen u16, name, 0, type */
+        nl = (uint32_t)strlen(name);
+        rec = old ? ((10 + nl + 2 + 3) & ~3u) : ((19 + nl + 1 + 7) & ~7u);
+        if (used + rec > len) {
+            if (!used) return -L_EINVAL;
+            if (name != f->pending) {         /* keep it for the next call */
+                snprintf(f->pending, sizeof(f->pending), "%s", name);
+                f->pending_isdir = isdir;
+            }
             return (int)used;
+        }
+        if (old) {
+            memset(RT_MEM + buf + used, 0, rec);
+            wr32(buf + used, path_ino(name));
+            wr32(buf + used + 4, used + rec);
+            wr16(buf + used + 8, (uint16_t)rec);
+            memcpy(RT_MEM + buf + used + 10, name, nl + 1);
+            wr8(buf + used + rec - 1, isdir ? 4 : 8);
         } else {
-            r = _findnext(f->find, &fdat);
+            wr64(buf + used, path_ino(name));
+            wr64(buf + used + 8, used + rec);
+            wr16(buf + used + 16, (uint16_t)rec);
+            wr8(buf + used + 18, isdir ? 4 : 8);
+            memcpy(RT_MEM + buf + used + 19, name, nl + 1);
         }
-        if (r != 0) { _findclose(f->find); f->find = -2; return (int)used; }
-        {
-            /* linux_dirent64: ino u64, off s64, reclen u16, type u8, name
-             * linux_dirent (old): ino u32, off u32, reclen u16, name, 0, type */
-            uint32_t nl = (uint32_t)strlen(fdat.name);
-            uint32_t rec = old ? ((10 + nl + 2 + 3) & ~3u) : ((19 + nl + 1 + 7) & ~7u);
-            if (used + rec > len) {
-                /* no room: remember to return this entry next time (re-list) */
-                if (!used) return -L_EINVAL;
-                _findclose(f->find);
-                f->find = 0;
-                f->dir_pos += 0;
-                return (int)used;
-            }
-            if (old) {
-                memset(RT_MEM + buf + used, 0, rec);
-                wr32(buf + used, path_ino(fdat.name));
-                wr32(buf + used + 4, used + rec);
-                wr16(buf + used + 8, (uint16_t)rec);
-                memcpy(RT_MEM + buf + used + 10, fdat.name, nl + 1);
-                wr8(buf + used + rec - 1, (fdat.attrib & _A_SUBDIR) ? 4 : 8);
-            } else {
-                wr64(buf + used, path_ino(fdat.name));
-                wr64(buf + used + 8, used + rec);
-                wr16(buf + used + 16, (uint16_t)rec);
-                wr8(buf + used + 18, (fdat.attrib & _A_SUBDIR) ? 4 : 8);
-                memcpy(RT_MEM + buf + used + 19, fdat.name, nl + 1);
-            }
-            used += rec;
-        }
+        used += rec;
+        f->pending[0] = 0;
     }
 }
 
 /* ---------------------------------------------------------------- threads, TLS */
-static volatile LONG g_next_tid = 1000;
+static int32_t g_next_tid = 1000;
 static __thread kthread *t_self;
-static volatile LONG g_threads = 1;
+static int32_t g_threads = 1;
 
 #define SHADOW_DEPTH 65536
 
 rt_cpu *thread_new_cpu(void)
 {
+#if defined(_WIN32)
     kthread *k = _aligned_malloc(sizeof(kthread), 64);
+#else
+    kthread *k = aligned_alloc(64, (sizeof(kthread) + 63) & ~(size_t)63);
+#endif
     memset(k, 0, sizeof(*k));
     k->cpu.shadow = malloc(sizeof(uint32_t) * SHADOW_DEPTH);
     k->cpu.shcap = SHADOW_DEPTH;
-    k->tid = (uint32_t)InterlockedIncrement(&g_next_tid) - 1;
+    k->tid = (uint32_t)plat_atomic_inc(&g_next_tid) - 1;
     if (!t_self) t_self = k;
     return &k->cpu;
 }
@@ -422,7 +432,7 @@ void rt_bounce(rt_cpu *cpu, uint32_t to)
 {
     kthread *k = self_of(cpu);
     k->bounce_to = to;
-    longjmp(k->bounce_jb, 1);
+    plat_longjmp(k->bounce_jb, 1);
 }
 
 void run_guest(rt_cpu *cpu_in, uint32_t target, int resume)
@@ -430,7 +440,7 @@ void run_guest(rt_cpu *cpu_in, uint32_t target, int resume)
     volatile uint32_t t = target;
     volatile int res = resume;
     t_self = (kthread *)cpu_in;
-    if (_setjmp(t_self->bounce_jb, NULL)) {
+    if (plat_setjmp(t_self->bounce_jb)) {
         /* back from rt_bounce: host frames above were abandoned */
         t = t_self->bounce_to;
         res = 1;
@@ -453,11 +463,14 @@ void run_guest(rt_cpu *cpu_in, uint32_t target, int resume)
 
 typedef struct { kthread *k; uint32_t resume; } child_start;
 
-static DWORD WINAPI child_main(LPVOID p)
+void plat_guest_thread_init(void);          /* weak hook: thread affinity on the Quest */
+
+static void *child_main(void *p)
 {
     child_start cs = *(child_start *)p;
     free(p);
     t_self = cs.k;
+    plat_guest_thread_init();
     run_guest(&cs.k->cpu, cs.resume, 1);
 }
 
@@ -466,7 +479,6 @@ static int sys_clone(rt_cpu *cpu, uint32_t next)
     uint32_t flags = cpu->ebx, stack = cpu->ecx, ptid = cpu->edx, tls = cpu->esi, ctid = cpu->edi;
     kthread *k;
     child_start *cs;
-    HANDLE h;
     if (!(flags & 0x100)) {                 /* !CLONE_VM: fork */
         klog("clone without CLONE_VM (fork) refused\n");
         return -L_ENOSYS;
@@ -497,17 +509,15 @@ static int sys_clone(rt_cpu *cpu, uint32_t next)
     cs = malloc(sizeof(*cs));
     cs->k = k;
     cs->resume = next;
-    InterlockedIncrement(&g_threads);
-    h = CreateThread(NULL, 64u << 20, child_main, cs, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
-    if (!h) return -L_EAGAIN;
-    CloseHandle(h);
+    plat_atomic_inc(&g_threads);
+    if (plat_thread_start(child_main, cs, 64u << 20) < 0) { plat_atomic_dec(&g_threads); return -L_EAGAIN; }
     klog("clone: thread %u (stack %08x, resume %08x)\n", k->tid, stack, next);
     return (int)k->tid;
 }
 
 static void futex_wake_addr(uint32_t a)
 {
-    WakeByAddressAll(RT_MEM + a);
+    plat_wake32((volatile uint32_t *)(RT_MEM + a), 1);
 }
 
 static void thread_exit(rt_cpu *cpu, int code)
@@ -517,11 +527,11 @@ static void thread_exit(rt_cpu *cpu, int code)
         wr32(k->clear_child_tid, 0);
         futex_wake_addr(k->clear_child_tid);
     }
-    if (InterlockedDecrement(&g_threads) == 0) {
+    if (plat_atomic_dec(&g_threads) == 0) {
         klog("last thread exited (%d)\n", code);
-        ExitProcess((UINT)code);
+        exit(code);
     }
-    ExitThread((DWORD)code);
+    plat_thread_exit();
 }
 
 static int sys_futex(rt_cpu *cpu, uint32_t uaddr, int op, uint32_t val, uint32_t timeout, uint32_t uaddr2, uint32_t val3)
@@ -530,39 +540,26 @@ static int sys_futex(rt_cpu *cpu, uint32_t uaddr, int op, uint32_t val, uint32_t
     (void)cpu;
     switch (cmd) {
     case 0: case 9: {                       /* WAIT, WAIT_BITSET */
-        DWORD ms = INFINITE;
+        int64_t tns = -1;
         if (timeout) {
             int64_t s = (int32_t)rd32(timeout), ns = (int32_t)rd32(timeout + 4);
-            if (cmd == 9) {                 /* absolute (CLOCK_MONOTONIC/REALTIME): approximate */
-                FILETIME ft;
-                int64_t now;
-                GetSystemTimePreciseAsFileTime(&ft);
-                now = ((((int64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000LL) / 10;
-                if (!(op & 256)) {          /* monotonic: use our clock */
-                    LARGE_INTEGER c, f;
-                    QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
-                    now = (int64_t)((double)c.QuadPart * 1e6 / (double)f.QuadPart);
-                }
-                {
-                    int64_t us = s * 1000000 + ns / 1000 - now;
-                    ms = us <= 0 ? 0 : (DWORD)(us / 1000);
-                }
-            } else {
-                ms = (DWORD)(s * 1000 + ns / 1000000);
+            tns = s * 1000000000ll + ns;
+            if (cmd == 9) {                 /* absolute: FUTEX_CLOCK_REALTIME or monotonic */
+                int64_t now = (op & 256) ? plat_real_ns() : (int64_t)plat_mono_ns();
+                tns -= now;
+                if (tns < 0) tns = 0;
             }
         }
         if (rd32(uaddr) != val) return -L_EAGAIN;
-        if (!WaitOnAddress(RT_MEM + uaddr, &val, 4, ms))
-            return GetLastError() == ERROR_TIMEOUT ? -L_ETIMEDOUT : 0;
-        return 0;
+        return plat_wait32((volatile uint32_t *)(RT_MEM + uaddr), val, tns) ? -L_ETIMEDOUT : 0;
     }
     case 1: case 10:                        /* WAKE, WAKE_BITSET */
-        if (val == 1) WakeByAddressSingle(RT_MEM + uaddr); else WakeByAddressAll(RT_MEM + uaddr);
+        plat_wake32((volatile uint32_t *)(RT_MEM + uaddr), val != 1);
         return (int)val;
     case 3: case 4:                         /* REQUEUE / CMP_REQUEUE: wake everyone */
         if (cmd == 4 && rd32(uaddr) != val3) return -L_EAGAIN;
-        WakeByAddressAll(RT_MEM + uaddr);
-        WakeByAddressAll(RT_MEM + uaddr2);
+        plat_wake32((volatile uint32_t *)(RT_MEM + uaddr), 1);
+        plat_wake32((volatile uint32_t *)(RT_MEM + uaddr2), 1);
         return 1;
     case 5: {                               /* WAKE_OP */
         uint32_t o = val3, oparg = (o >> 12) & 0xfff, cmparg = o & 0xfff, opn = (o >> 28) & 7;
@@ -575,8 +572,8 @@ static int sys_futex(rt_cpu *cpu, uint32_t uaddr, int op, uint32_t val, uint32_t
         switch (cmp) { case 0: ok = old == cmparg; break; case 1: ok = old != cmparg; break;
                        case 2: ok = (int32_t)old < (int32_t)cmparg; break; case 3: ok = (int32_t)old <= (int32_t)cmparg; break;
                        case 4: ok = (int32_t)old > (int32_t)cmparg; break; default: ok = (int32_t)old >= (int32_t)cmparg; }
-        WakeByAddressAll(RT_MEM + uaddr);
-        if (ok) WakeByAddressAll(RT_MEM + uaddr2);
+        plat_wake32((volatile uint32_t *)(RT_MEM + uaddr), 1);
+        if (ok) plat_wake32((volatile uint32_t *)(RT_MEM + uaddr2), 1);
         return 1;
     }
     default:
@@ -588,28 +585,23 @@ static int sys_futex(rt_cpu *cpu, uint32_t uaddr, int op, uint32_t val, uint32_t
 /* ---------------------------------------------------------------- time */
 static void now_mono(int64_t *s, int64_t *ns)
 {
-    LARGE_INTEGER c, f;
-    QueryPerformanceCounter(&c);
-    QueryPerformanceFrequency(&f);
-    *s = c.QuadPart / f.QuadPart;
-    *ns = (int64_t)((c.QuadPart % f.QuadPart) * 1000000000LL / f.QuadPart);
+    uint64_t t = plat_mono_ns();
+    *s = (int64_t)(t / 1000000000ull);
+    *ns = (int64_t)(t % 1000000000ull);
 }
 
 static void now_real(int64_t *s, int64_t *ns)
 {
-    FILETIME ft;
-    int64_t t;
-    GetSystemTimePreciseAsFileTime(&ft);
-    t = (((int64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) - 116444736000000000LL;
-    *s = t / 10000000;
-    *ns = (t % 10000000) * 100;
+    int64_t t = plat_real_ns();
+    *s = t / 1000000000ll;
+    *ns = t % 1000000000ll;
 }
 
 static void sleep_ns(int64_t s, int64_t ns)
 {
     int64_t ms = s * 1000 + ns / 1000000;
-    if (ms <= 0) { SwitchToThread(); return; }
-    Sleep((DWORD)ms);
+    if (ms <= 0) { plat_yield(); return; }
+    plat_sleep_ms((uint32_t)ms);
 }
 
 /* ---------------------------------------------------------------- mmap */
@@ -643,11 +635,11 @@ static int64_t sys_mmap2(uint32_t addr, uint32_t len, uint32_t prot, uint32_t fl
     }
     if (mem_map(addr, len) < 0) return -L_ENOMEM;
     if (f) {
-        int64_t cur = _lseeki64(f->hfd, 0, SEEK_CUR);
+        int64_t cur = p_lseek(f->hfd, 0, SEEK_CUR);
         int n;
-        _lseeki64(f->hfd, (int64_t)pgoff * 4096, SEEK_SET);
-        n = _read(f->hfd, RT_MEM + addr, len);
-        _lseeki64(f->hfd, cur, SEEK_SET);
+        p_lseek(f->hfd, (int64_t)pgoff * 4096, SEEK_SET);
+        n = p_read(f->hfd, RT_MEM + addr, len);
+        p_lseek(f->hfd, cur, SEEK_SET);
         if (n < 0) n = 0;
     }
     if (g_verbose) klog("mmap2(%08x, %#x, fd %d %s) = %08x\n", addr, len, fd, f ? f->gpath : "anon", addr);
@@ -690,7 +682,7 @@ static int sys_rw(int write, uint32_t fd, uint32_t buf, uint32_t n)
              ((char *)RT_MEM)[buf + n - 1] == '\n' ? "" : "\n");
         return (int)n;
     }
-    r = write ? _write(f->hfd, RT_MEM + buf, n) : _read(f->hfd, RT_MEM + buf, n);
+    r = write ? p_write(f->hfd, RT_MEM + buf, n) : p_read(f->hfd, RT_MEM + buf, n);
     return r < 0 ? lerrno(errno) : r;
 }
 
@@ -706,37 +698,37 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
     watch_poll();
     switch (nr) {
     case 1:   thread_exit(cpu, (int)a); break;                                  /* exit */
-    case 252: klog("exit_group(%d)\n", (int)a); fflush(NULL); ExitProcess(a);   /* exit_group */
+    case 252: klog("exit_group(%d)\n", (int)a); fflush(NULL); exit((int)a);   /* exit_group */
     case 3:   r = sys_rw(0, a, b, c); break;
     case 4:   r = sys_rw(1, a, b, c); break;
     case 5:   r = sys_open(gstr(a), (int)b, (int)c); break;
     case 295: r = ((int32_t)a == -100) ? sys_open(gstr(b), (int)c, (int)d) : -L_ENOSYS; break;  /* openat(AT_FDCWD) */
     case 6:   r = sys_close(a); break;
-    case 10:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (_unlink(h) < 0 ? lerrno(errno) : 0) : -L_ENOENT; } break;
+    case 10:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (p_unlink(h) < 0 ? lerrno(errno) : 0) : -L_ENOENT; } break;
     case 12:  { char h[1024], g[1024]; if (vfs_host_path(gstr(a), h, sizeof(h)) && is_host_dir(h)) { normalize(gstr(a), g, sizeof(g)); snprintf(g_cwd, sizeof(g_cwd), "%s", g); r = 0; } else r = -L_ENOENT; } break;
     case 13:  now_real(&s, &ns); if (a) wr32(a, (uint32_t)s); r = s; break;    /* time */
-    case 19:  { gfd *fd = fd_get(a); r = fd && fd->hfd >= 0 ? _lseeki64(fd->hfd, (int32_t)b, (int)c) : -L_EBADF; if (r < 0 && fd) r = -L_ESPIPE; } break;
+    case 19:  { gfd *fd = fd_get(a); r = fd && fd->hfd >= 0 ? p_lseek(fd->hfd, (int32_t)b, (int)c) : -L_EBADF; if (r < 0 && fd) r = -L_ESPIPE; } break;
     case 140: { gfd *fd = fd_get(a); int64_t off = ((int64_t)b << 32) | c;   /* _llseek */
                 if (!fd || fd->hfd < 0) { r = -L_EBADF; break; }
-                off = _lseeki64(fd->hfd, off, (int)e);
+                off = p_lseek(fd->hfd, off, (int)e);
                 if (off < 0) { r = -L_EINVAL; break; }
                 wr64(d, (uint64_t)off); r = 0; } break;
     case 20:  r = 1000; break;                                                  /* getpid */
     case 224: r = self_of(cpu)->tid; break;                                     /* gettid */
     case 64:  r = 1; break;                                                     /* getppid */
     case 24: case 47: case 49: case 50: case 199: case 200: case 201: case 202: r = 0; break; /* uid/gid: root */
-    case 33:  { char h[1024]; r = (vfs_host_path(gstr(a), h, sizeof(h)) && _access(h, 0) == 0) ? 0 : -L_ENOENT; } break;
+    case 33:  { char h[1024]; r = (vfs_host_path(gstr(a), h, sizeof(h)) && p_access(h, 0) == 0) ? 0 : -L_ENOENT; } break;
     case 37: case 270: if ((nr == 37 ? b : c) == 6) kfatal(cpu, "guest abort() (SIGABRT)"); r = 0; break;
-    case 38:  { char h1[1024], h2[1024]; r = (vfs_host_path(gstr(a), h1, 1024) && vfs_host_path(gstr(b), h2, 1024)) ? (MoveFileExA(h1, h2, MOVEFILE_REPLACE_EXISTING) ? 0 : -L_EACCES) : -L_ENOENT; } break;
-    case 39:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (_mkdir(h) < 0 ? lerrno(errno) : 0) : -L_EACCES; } break;
-    case 40:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (_rmdir(h) < 0 ? lerrno(errno) : 0) : -L_ENOENT; } break;
+    case 38:  { char h1[1024], h2[1024]; r = (vfs_host_path(gstr(a), h1, 1024) && vfs_host_path(gstr(b), h2, 1024)) ? (plat_rename(h1, h2) == 0 ? 0 : -L_EACCES) : -L_ENOENT; } break;
+    case 39:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (p_mkdir(h) < 0 ? lerrno(errno) : 0) : -L_EACCES; } break;
+    case 40:  { char h[1024]; r = vfs_host_path(gstr(a), h, sizeof(h)) ? (p_rmdir(h) < 0 ? lerrno(errno) : 0) : -L_ENOENT; } break;
     case 41: case 63: { gfd *fd = fd_get(a); int nfd;                          /* dup / dup2 */
                 if (!fd) { r = -L_EBADF; break; }
-                EnterCriticalSection(&g_fd_cs);
+                plat_mutex_lock(&g_fd_cs);
                 nfd = nr == 41 ? fd_alloc(0) : (int)b;
                 if (nfd >= 0 && nfd < MAXFD) { if (nr == 63 && g_fd[nfd].used && nfd != (int)a) sys_close(nfd);
-                    g_fd[nfd] = *fd; g_fd[nfd].hfd = fd->hfd >= 0 ? _dup(fd->hfd) : -1; g_fd[nfd].find = 0; }
-                LeaveCriticalSection(&g_fd_cs); r = nfd; } break;
+                    g_fd[nfd] = *fd; g_fd[nfd].hfd = fd->hfd >= 0 ? p_dup(fd->hfd) : -1; g_fd[nfd].dir = NULL; g_fd[nfd].dir_done = 0; g_fd[nfd].pending[0] = 0; }
+                plat_mutex_unlock(&g_fd_cs); r = nfd; } break;
     case 43:  r = 0; break;                                                     /* times */
     case 45:  if (a > g_brk) { if (mem_map(g_brk, a - g_brk) == 0) g_brk = a; }                  /* brk */
               else if (a && a >= g_brk_start && a < g_brk) { mem_unmap((a + 0xfff) & ~0xfffu, g_brk - ((a + 0xfff) & ~0xfffu)); g_brk = a; }
@@ -746,14 +738,14 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
         if (!fd_get(a)) { r = -L_EBADF; break; }
         if (b == 0 || b == 1030) {                                              /* F_DUPFD(_CLOEXEC) */
             int nfd;
-            EnterCriticalSection(&g_fd_cs);
+            plat_mutex_lock(&g_fd_cs);
             nfd = fd_alloc((int)c);
             if (nfd >= 0) {
                 g_fd[nfd] = g_fd[a];
-                g_fd[nfd].hfd = g_fd[a].hfd >= 0 ? _dup(g_fd[a].hfd) : -1;
-                g_fd[nfd].find = 0;
+                g_fd[nfd].hfd = g_fd[a].hfd >= 0 ? p_dup(g_fd[a].hfd) : -1;
+                g_fd[nfd].dir = NULL; g_fd[nfd].dir_done = 0; g_fd[nfd].pending[0] = 0;
             }
-            LeaveCriticalSection(&g_fd_cs);
+            plat_mutex_unlock(&g_fd_cs);
             r = nfd;
         } else {
             r = 0;                                                              /* F_GETFD/SETFD/GETFL/SETFL */
@@ -783,7 +775,7 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
                 for (i = 0; i < c; i++) { int k = sys_rw(nr == 146, a, rd32(b + 8 * i), rd32(b + 8 * i + 4));
                     if (k < 0) { if (!tot) tot = (uint32_t)k; break; } tot += (uint32_t)k; if ((uint32_t)k < rd32(b + 8 * i + 4)) break; }
                 r = (int32_t)tot; } break;
-    case 158: SwitchToThread(); r = 0; break;                                   /* sched_yield */
+    case 158: plat_yield(); r = 0; break;                                   /* sched_yield */
     case 154: case 156: r = 0; break;                                           /* sched_setparam/setscheduler: accepted */
     case 155: if (b) wr32(b, 0); r = 0; break;                                  /* sched_getparam: priority 0 */
     case 157: r = 0; break;                                                     /* sched_getscheduler: SCHED_OTHER */
@@ -797,9 +789,9 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
     case 172: r = 0; break;                                                     /* prctl */
     case 180: case 181: { gfd *fd = fd_get(a); int64_t cur, off = ((int64_t)e << 32) | d;   /* pread64/pwrite64 */
                 if (!fd || fd->hfd < 0) { r = -L_EBADF; break; }
-                cur = _lseeki64(fd->hfd, 0, SEEK_CUR); _lseeki64(fd->hfd, off, SEEK_SET);
-                r = nr == 180 ? _read(fd->hfd, RT_MEM + b, c) : _write(fd->hfd, RT_MEM + b, c);
-                _lseeki64(fd->hfd, cur, SEEK_SET); } break;
+                cur = p_lseek(fd->hfd, 0, SEEK_CUR); p_lseek(fd->hfd, off, SEEK_SET);
+                r = nr == 180 ? p_read(fd->hfd, RT_MEM + b, c) : p_write(fd->hfd, RT_MEM + b, c);
+                p_lseek(fd->hfd, cur, SEEK_SET); } break;
     case 183: { uint32_t l = (uint32_t)strlen(g_cwd) + 1; if (l > b) { r = -L_ERANGE; break; } memcpy(RT_MEM + a, g_cwd, l); r = l; } break;
     case 191: case 76: if (a == 3) { wr32(b, 8u << 20); wr32(b + 4, 0xffffffffu); }   /* ugetrlimit */
                        else if (a == 7) { wr32(b, 1024); wr32(b + 4, 4096); }
@@ -825,8 +817,8 @@ void rt_syscall(rt_cpu *cpu, uint32_t next)
     case 266: if (b) { wr32(b, 0); wr32(b + 4, 1); } r = 0; break;              /* clock_getres */
     case 268: memset(RT_MEM + c, 0, b); wr32(c, 0xef53); wr32(c + 4, 4096); r = 0; break; /* statfs64 */
     case 42: case 331: { int p[2]; int r0, r1;                                 /* pipe / pipe2 */ if (_pipe(p, 65536, _O_BINARY) < 0) { r = -L_EMFILE; break; }
-                EnterCriticalSection(&g_fd_cs); r0 = fd_alloc(3); g_fd[r0].hfd = p[0]; r1 = fd_alloc(3); g_fd[r1].hfd = p[1];
-                LeaveCriticalSection(&g_fd_cs); wr32(a, r0); wr32(a + 4, r1); r = 0; } break;
+                plat_mutex_lock(&g_fd_cs); r0 = fd_alloc(3); g_fd[r0].hfd = p[0]; r1 = fd_alloc(3); g_fd[r1].hfd = p[1];
+                plat_mutex_unlock(&g_fd_cs); wr32(a, r0); wr32(a + 4, r1); r = 0; } break;
     case 2: case 190: case 11: r = -L_ENOSYS; break;                            /* fork vfork execve */
     case 114: case 7: r = -10; break;                                           /* wait: ECHILD */
     default:
@@ -846,7 +838,7 @@ static int g_ndyn;
 static char g_fake_libs[16][64];
 static int g_nfake;
 static int g_last_fake;
-static CRITICAL_SECTION g_dyn_cs;
+static plat_mutex g_dyn_cs;
 static int g_dyn_init;
 
 const char *dyn_thunk_name(uint32_t a)
@@ -861,15 +853,15 @@ const char *dyn_thunk_name(uint32_t a)
 uint32_t host_thunk_addr(const char *name)
 {
     int i;
-    if (!g_dyn_init) { g_dyn_init = 1; InitializeCriticalSection(&g_dyn_cs); }
-    EnterCriticalSection(&g_dyn_cs);
+    if (!g_dyn_init) { g_dyn_init = 1; plat_mutex_init(&g_dyn_cs); }
+    plat_mutex_lock(&g_dyn_cs);
     for (i = 0; i < g_ndyn; i++)
-        if (!strcmp(g_dyn[i].name, name)) { LeaveCriticalSection(&g_dyn_cs); return g_dyn[i].addr; }
+        if (!strcmp(g_dyn[i].name, name)) { plat_mutex_unlock(&g_dyn_cs); return g_dyn[i].addr; }
     if (g_ndyn == MAX_DYN) kfatal(NULL, "too many dlsym thunks");
     g_dyn[g_ndyn].addr = DYN_THUNK_BASE + 16u * (uint32_t)g_ndyn;
     snprintf(g_dyn[g_ndyn].name, sizeof(g_dyn[0].name), "%s", name);
     i = g_ndyn++;
-    LeaveCriticalSection(&g_dyn_cs);
+    plat_mutex_unlock(&g_dyn_cs);
     return g_dyn[i].addr;
 }
 
@@ -893,7 +885,7 @@ int host_call(rt_cpu *cpu, uint32_t target)
 {
     const char *name;
     lifted_fn fn;
-    if (!g_dyn_init) { g_dyn_init = 1; InitializeCriticalSection(&g_dyn_cs); }
+    if (!g_dyn_init) { g_dyn_init = 1; plat_mutex_init(&g_dyn_cs); }
     name = thunk_name(target);
     if (!name) return 0;
     fn = find_lifted(target);
