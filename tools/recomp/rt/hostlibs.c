@@ -2,7 +2,8 @@
  * hostlibs.c — host implementations of the libraries the recompiled
  * process does not run itself: SDL 1.2 (subset the game uses), OpenGL
  * (generated thunks in out/gl_thunks.c + the hand-written ones here), GLX
- * proc lookup, GLU, glut, udev, X11. Windows host: Win32 window + WGL.
+ * proc lookup, GLU, glut, udev, X11. The window, context and OS input come
+ * from video.h (video_win.c: Win32 + WGL; video_android.c: EGL + OpenXR).
  *
  * Called from host_call() with the guest stack as on i386: [esp] is the
  * return address, arguments above it; results go to eax (or st0), and the
@@ -12,14 +13,14 @@
  * and X11 are stubs that report failure, so the game takes its own
  * "no device" paths.
  */
-#include <windows.h>
-#include <GL/gl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "rt.h"
 #include "kernel.h"
 #include "gl_host.h"
+#include "plat.h"
+#include "video.h"
 
 #define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
 #define ARGF(i) rdf32(cpu->esp + 4 + 4 * (i))
@@ -29,6 +30,7 @@
 #define HOSTHEAP_BASE 0xb6000000u
 #define HOSTHEAP_SIZE 0x00400000u
 static uint32_t g_hh_next;
+static plat_mutex g_evlock;           /* SDL event queue lock (below) */
 
 /* Reserved at startup, before the guest maps anything (mapping it later
  * would zero guest pages the guest's mmap may have put there). */
@@ -36,6 +38,7 @@ void host_heap_init(void)
 {
     mem_map(HOSTHEAP_BASE, HOSTHEAP_SIZE);
     g_hh_next = HOSTHEAP_BASE;
+    plat_mutex_init(&g_evlock);
 }
 
 uint32_t guest_alloc(uint32_t n)
@@ -55,32 +58,39 @@ uint32_t guest_strdup(const char *s)
     return a;
 }
 
-/* ---- window + GL context ---- */
-static HWND g_wnd;
-static HDC g_dc;
-static HGLRC g_rc;
+/* ---- window state (video.h does the platform part) ---- */
 static int g_w = 1360, g_h = 768;
 static uint32_t g_surface;            /* guest SDL_Surface */
 static uint32_t g_errstr;
-static LARGE_INTEGER g_t0, g_freq;
+static uint64_t g_t0;
+
+/* GL entry points hostlibs calls itself */
+typedef const char *(GLAPI_CALL *pf_getstring)(uint32_t);
+typedef void (GLAPI_CALL *pf_pixelstore)(uint32_t, int32_t);
+typedef void (GLAPI_CALL *pf_readbuffer)(uint32_t);
+typedef void (GLAPI_CALL *pf_readpixels)(int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, void *);
+typedef uint32_t (GLAPI_CALL *pf_geterror)(void);
+typedef void (GLAPI_CALL *pf_getintegerv)(uint32_t, int32_t *);
+typedef void (GLAPI_CALL *pf_teximage)(uint32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *);
+typedef void (GLAPI_CALL *pf_genmip)(uint32_t);
+#define HGL(idx, name, type) ((type)gl_proc(idx, name))
 
 /* SDL event queue (guest SDL_Event layout, 20 bytes) */
 #define QN 256
 static uint8_t g_evq[QN][20];
 static int g_evh, g_evt;
+/* g_evlock (above): window/render thread pushes, io thread polls */
 
-static SRWLOCK g_evlock = SRWLOCK_INIT;   /* window/render thread pushes, io thread polls */
-
-static void push_event(const uint8_t *ev)
+void host_push_event(const uint8_t *ev)
 {
     int n;
-    AcquireSRWLockExclusive(&g_evlock);
+    plat_mutex_lock(&g_evlock);
     n = (g_evt + 1) % QN;
     if (n != g_evh) {
         memcpy(g_evq[g_evt], ev, 20);
         g_evt = n;
     }
-    ReleaseSRWLockExclusive(&g_evlock);
+    plat_mutex_unlock(&g_evlock);
 }
 
 /* JPRT_KEYS="frame+sym,frame-sym,...": scripted SDL key down (+) / up (-)
@@ -104,155 +114,23 @@ static void scripted_keys(unsigned frame)
         if (e[0] >= '0' && e[0] <= '9' && e[1] >= '0' && e[1] <= '9') sym = (uint32_t)strtoul(e, &e, 10);
         else sym = (uint8_t)*e++;
         memcpy(ev + 8, &sym, 4);
-        push_event(ev);
+        host_push_event(ev);
         klog("JPRT_KEYS: frame %u key %u %s\n", frame, sym, ev[0] == 2 ? "down" : "up");
         p = *e == ',' ? e + 1 : e;
-    }
-}
-
-static uint32_t sdl_key(WPARAM vk)
-{
-    if (vk >= 'A' && vk <= 'Z') return (uint32_t)(vk - 'A' + 'a');
-    if (vk >= '0' && vk <= '9') return (uint32_t)vk;
-    switch (vk) {
-    case VK_ESCAPE: return 27; case VK_RETURN: return 13; case VK_SPACE: return 32;
-    case VK_BACK: return 8; case VK_TAB: return 9;
-    case VK_UP: return 273; case VK_DOWN: return 274; case VK_RIGHT: return 275; case VK_LEFT: return 276;
-    case VK_F1: return 282; case VK_F2: return 283; case VK_F3: return 284; case VK_F4: return 285;
-    case VK_F5: return 286; case VK_F6: return 287; case VK_F7: return 288; case VK_F8: return 289;
-    case VK_F9: return 290; case VK_F10: return 291; case VK_F11: return 292; case VK_F12: return 293;
-    case VK_SHIFT: return 304; case VK_CONTROL: return 306; case VK_MENU: return 308;
-    default: return 0;
-    }
-}
-
-static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
-{
-    uint8_t ev[20] = { 0 };
-    switch (m) {
-    case WM_CLOSE:
-        ev[0] = 12;                                   /* SDL_QUIT */
-        push_event(ev);
-        return 0;
-    case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: {
-        /* SDL_KeyboardEvent (i386): type, which, state, pad, keysym {
-         * scancode @4, sym @8, mod @12, unicode @16 } */
-        uint32_t sym = sdl_key(w);
-        if (!sym || (m == WM_KEYDOWN && (l & 0x40000000))) break;   /* no auto-repeat */
-        ev[0] = (m == WM_KEYDOWN || m == WM_SYSKEYDOWN) ? 2 : 3;   /* SDL_KEYDOWN / UP */
-        ev[2] = ev[0] == 2 ? 1 : 0;
-        ev[4] = (uint8_t)((l >> 16) & 0xff);
-        memcpy(ev + 8, &sym, 4);
-        push_event(ev);
-        return 0;
-    }
-    case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP:
-    case WM_MBUTTONDOWN: case WM_MBUTTONUP: {
-        /* SDL_MouseMotionEvent: type 4, which, state @2, x @4, y @6, xrel @8, yrel @10
-         * SDL_MouseButtonEvent: type 5/6, which, button @2, state @3, x @4, y @6
-         * (the game's io_sdl_loop drives the gun's analog x/y from these) */
-        static int lx, ly;
-        uint16_t x = (uint16_t)(short)LOWORD(l), y = (uint16_t)(short)HIWORD(l);
-        int16_t dx = (int16_t)(x - lx), dy = (int16_t)(y - ly);
-        lx = x; ly = y;
-        if (m == WM_MOUSEMOVE) {
-            ev[0] = 4;
-            ev[2] = (uint8_t)(((w & MK_LBUTTON) ? 1 : 0) | ((w & MK_MBUTTON) ? 2 : 0) | ((w & MK_RBUTTON) ? 4 : 0));
-            memcpy(ev + 8, &dx, 2);
-            memcpy(ev + 10, &dy, 2);
-        } else {
-            ev[0] = (m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN) ? 5 : 6;
-            ev[2] = (m == WM_LBUTTONDOWN || m == WM_LBUTTONUP) ? 1 : (m == WM_MBUTTONDOWN || m == WM_MBUTTONUP) ? 2 : 3;
-            ev[3] = ev[0] == 5 ? 1 : 0;
-        }
-        memcpy(ev + 4, &x, 2);
-        memcpy(ev + 6, &y, 2);
-        push_event(ev);
-        return 0;
-    }
-    }
-    return DefWindowProcA(h, m, w, l);
-}
-
-static void pump(void)
-{
-    MSG msg;
-    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
     }
 }
 
 extern int g_gles;                    /* gles.c: the context is OpenGL ES */
 static int g_swap_interval = 1;
 
-static void apply_swap_interval(void)
-{
-    BOOL (WINAPI *si)(int);
-    if (!g_rc) return;                         /* applied once the context exists */
-    si = (void *)wglGetProcAddress("wglSwapIntervalEXT");
-    if (si) si(g_swap_interval);
-    klog("swap interval %d\n", g_swap_interval);
-}
-
-static int create_window(int w, int h, int gl)
-{
-    WNDCLASSA wc = { 0 };
-    RECT r = { 0, 0, w, h };
-    PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
-                                  PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 24, 8, 0,
-                                  PFD_MAIN_PLANE, 0, 0, 0, 0 };
-    if (g_wnd) return 0;
-    wc.lpfnWndProc = wndproc;
-    wc.hInstance = GetModuleHandleA(NULL);
-    wc.lpszClassName = "jp2015";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassA(&wc);
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    g_wnd = CreateWindowA("jp2015", "Jurassic Park (recompiled)", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                          CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
-                          NULL, NULL, wc.hInstance, NULL);
-    if (!g_wnd) return -1;
-    g_dc = GetDC(g_wnd);
-    if (gl) {
-        int pf = ChoosePixelFormat(g_dc, &pfd);
-        SetPixelFormat(g_dc, pf, &pfd);
-        g_rc = wglCreateContext(g_dc);
-        if (!g_rc || !wglMakeCurrent(g_dc, g_rc)) return -1;
-        if (getenv("JPRT_GLES") && atoi(getenv("JPRT_GLES"))) {
-            /* OpenGL ES 3.2 profile context (WGL_EXT_create_context_es2_profile):
-             * the Quest's API, exercised on the PC */
-            HGLRC (WINAPI *cca)(HDC, HGLRC, const int *) = (void *)wglGetProcAddress("wglCreateContextAttribsARB");
-            const int attr[] = { 0x2091, 3, 0x2092, 2, 0x9126, 0x4, 0 };
-            HGLRC es = cca ? cca(g_dc, NULL, attr) : NULL;
-            if (!es) kfatal(NULL, "JPRT_GLES: no OpenGL ES 3.2 context on this host");
-            wglMakeCurrent(NULL, NULL);
-            wglDeleteContext(g_rc);
-            g_rc = es;
-            if (!wglMakeCurrent(g_dc, g_rc)) return -1;
-            g_gles = 1;
-        }
-        apply_swap_interval();
-        klog("GL: %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
-             (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
-    }
-    pump();
-    return 0;
-}
-
 /* ---- GL host pieces ---- */
 static void *g_procs[4096];
-static HMODULE g_ogl;
 
 void *gl_proc(int idx, const char *name)
 {
     void *p = idx < 4096 ? g_procs[idx] : NULL;
     if (p) return p;
-    p = (void *)wglGetProcAddress(name);
-    if ((uintptr_t)p <= 3 || (intptr_t)p == -1) {
-        if (!g_ogl) g_ogl = LoadLibraryA("opengl32.dll");
-        p = (void *)GetProcAddress(g_ogl, name);
-    }
+    p = vid_gl_proc(name);
     if (!p) kfatal(NULL, "GL: %s not available on this host", name);
     if (idx < 4096) g_procs[idx] = p;
     return p;
@@ -285,7 +163,7 @@ static int gl_manual(rt_cpu *cpu, const char *name)
         const char *s;
         int i;
         for (i = 0; i < n; i++) if (cache[i].key == key) RET(cache[i].g);
-        s = idx == 0xffffffffu ? (const char *)glGetString(e)
+        s = idx == 0xffffffffu ? HGL(4008, "glGetString", pf_getstring)(e)
                                : ((const char *(GLAPI_CALL *)(uint32_t, uint32_t))gl_proc(4001, "glGetStringi"))(e, idx);
         if (!s) RET(0);
         if (n < 64) { cache[n].key = key; cache[n].g = guest_strdup(s); RET(cache[n++].g); }
@@ -420,15 +298,15 @@ static int gl_dispatch(rt_cpu *cpu, const char *name)
     if (check && r && strcmp(name, "glGetError")) {
         static struct { const char *n; int c; } seen[256];
         static int ns;
-        uint32_t e = glGetError();
+        uint32_t e = HGL(4009, "glGetError", pf_geterror)();
         int i;
         if (e) {
             for (i = 0; i < ns && strcmp(seen[i].n, name); i++) {}
             if (i == ns && ns < 256) seen[ns++].n = name;
             if (i < 256 && seen[i].c++ < 4) {
                 int32_t dfb = 0, rfb = 0;
-                glGetIntegerv(0x8CA6, &dfb);
-                glGetIntegerv(0x8CAA, &rfb);
+                HGL(4010, "glGetIntegerv", pf_getintegerv)(0x8CA6, &dfb);
+                HGL(4010, "glGetIntegerv", pf_getintegerv)(0x8CAA, &rfb);
                 klog("glcheck: %s(%#x, %#x, %#x, %#x, %#x) -> error %#x [from %08x, draw fb %d, read fb %d]\n",
                      name, a[0], a[1], a[2], a[3], a[4], e, ra, dfb, rfb);
                 if (!strcmp(name, "glDrawBuffers") && a[1])
@@ -450,8 +328,7 @@ static int sdl(rt_cpu *cpu, const char *n)
 {
     if (sdl_audio(cpu, n)) return 1;
     if (!strcmp(n, "SDL_Init")) {
-        QueryPerformanceFrequency(&g_freq);
-        QueryPerformanceCounter(&g_t0);
+        if (!g_t0) g_t0 = plat_mono_ns();
         klog("SDL_Init(%#x)\n", ARG(0));
         g_sdl_inited |= ARG(0) & 0xffffu;
         RET(0);
@@ -462,12 +339,10 @@ static int sdl(rt_cpu *cpu, const char *n)
     if (!strcmp(n, "SDL_WasInit")) RET(g_sdl_inited & ARG(0));
     if (!strcmp(n, "SDL_Quit")) RET(0);
     if (!strcmp(n, "SDL_GetTicks")) {
-        LARGE_INTEGER t;
-        if (!g_freq.QuadPart) { QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_t0); }
-        QueryPerformanceCounter(&t);
-        RET((uint32_t)((t.QuadPart - g_t0.QuadPart) * 1000 / g_freq.QuadPart));
+        if (!g_t0) g_t0 = plat_mono_ns();
+        RET((uint32_t)((plat_mono_ns() - g_t0) / 1000000ull));
     }
-    if (!strcmp(n, "SDL_Delay")) { Sleep(ARG(0)); pump(); audio_pump(cpu); RET(0); }
+    if (!strcmp(n, "SDL_Delay")) { plat_sleep_ms(ARG(0)); vid_pump(); audio_pump(cpu); RET(0); }
     if (!strcmp(n, "SDL_GetError") || !strcmp(n, "SDL_Error")) {
         if (!g_errstr) g_errstr = guest_strdup("unsupported in the recompiled build");
         RET(g_errstr);
@@ -477,12 +352,14 @@ static int sdl(rt_cpu *cpu, const char *n)
     if (!strcmp(n, "SDL_SetVideoMode") || !strcmp(n, "SDL_GetVideoSurface")) {
         if (!strcmp(n, "SDL_SetVideoMode")) {
             uint32_t w = ARG(0), h = ARG(1), flags = ARG(3);
-            klog("SDL_SetVideoMode(%u, %u, %u, %#x) on thread %lu\n", w, h, ARG(2), flags, GetCurrentThreadId());
+            klog("SDL_SetVideoMode(%u, %u, %u, %#x) on thread %llu\n", w, h, ARG(2), flags,
+                 (unsigned long long)plat_thread_id());
             if (w) g_w = (int)w;
             if (h) g_h = (int)h;
-            if (create_window(g_w, g_h, (flags & 2) != 0) < 0) RET(0);
+            if (vid_create(g_w, g_h) < 0) RET(0);
+            vid_swap_interval(g_swap_interval);
         }
-        if (!g_surface && g_wnd) {
+        if (!g_surface && vid_ready()) {
             /* SDL_Surface (i386): flags, format*, w, h, pitch, pixels ... */
             g_surface = guest_alloc(64);
             memset(RT_P(g_surface), 0, 64);
@@ -501,8 +378,10 @@ static int sdl(rt_cpu *cpu, const char *n)
             memset(RT_P(vi), 0, 32);
             wr32(vi + 4, 1u << 9);
             wr32(vi + 8, 1 << 20);
-            wr32(vi + 16, (uint32_t)GetSystemMetrics(SM_CXSCREEN));
-            wr32(vi + 20, (uint32_t)GetSystemMetrics(SM_CYSCREEN));
+            int sw, sh;
+            vid_screen_size(&sw, &sh);
+            wr32(vi + 16, (uint32_t)sw);
+            wr32(vi + 20, (uint32_t)sh);
         }
         RET(vi);
     }
@@ -510,7 +389,7 @@ static int sdl(rt_cpu *cpu, const char *n)
         static unsigned frames;
         static int shot_every = -1, shots;
         if (shot_every < 0) shot_every = getenv("JPRT_SHOT_EVERY") ? atoi(getenv("JPRT_SHOT_EVERY")) : 0;
-        if (shot_every > 0 && frames % (unsigned)shot_every == 0 && shots < 64 && g_rc) {
+        if (shot_every > 0 && frames % (unsigned)shot_every == 0 && shots < 64 && vid_ready()) {
             /* the game's own back buffer -> BMP (never the screen) */
             int w = g_w, h = g_h, stride = (w * 3 + 3) & ~3, y;
             uint8_t *px = malloc((size_t)stride * h);
@@ -518,9 +397,9 @@ static int sdl(rt_cpu *cpu, const char *n)
             FILE *f;
             uint8_t *rgba = malloc((size_t)w * h * 4);
             int x;
-            glPixelStorei(GL_PACK_ALIGNMENT, 4);
-            glReadBuffer(GL_BACK);
-            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);   /* BGR is not in ES */
+            HGL(4011, "glPixelStorei", pf_pixelstore)(0x0D05 /* PACK_ALIGNMENT */, 4);
+            if (!vid_default_fbo()) HGL(4012, "glReadBuffer", pf_readbuffer)(0x0405 /* BACK */);
+            HGL(4013, "glReadPixels", pf_readpixels)(0, 0, w, h, 0x1908 /* RGBA */, 0x1401, rgba);   /* BGR is not in ES */
             for (y = 0; y < h; y++)
                 for (x = 0; x < w; x++) {
                     const uint8_t *s = rgba + ((size_t)y * w + x) * 4;
@@ -542,34 +421,30 @@ static int sdl(rt_cpu *cpu, const char *n)
             }
             free(px);
         }
-        if (frames < 3)
-            klog("swap on thread %lu (GL context current: %p)\n", GetCurrentThreadId(), (void *)wglGetCurrentContext());
-        if (g_dc) SwapBuffers(g_dc);
+        if (frames < 3) klog("swap on thread %llu\n", (unsigned long long)plat_thread_id());
+        vid_present();
         {   /* frame pacing: the cabinet ran at the display rate (60 Hz);
              * drivers may ignore the swap interval, so cap here too */
             static double next;
             static int cap = -1;
-            LARGE_INTEGER t, fq;
             double now;
             if (cap < 0) {
-                cap = getenv("JPRT_FPSCAP") ? atoi(getenv("JPRT_FPSCAP")) : 60;
-                timeBeginPeriod(1);
+                /* under OpenXR xrWaitFrame paces (vid_default_fbo != 0) */
+                cap = getenv("JPRT_FPSCAP") ? atoi(getenv("JPRT_FPSCAP")) : vid_default_fbo() ? 0 : 60;
+                plat_timer_resolution();
             }
             if (cap > 0) {
-                QueryPerformanceCounter(&t);
-                QueryPerformanceFrequency(&fq);
-                now = (double)t.QuadPart / (double)fq.QuadPart;
+                now = (double)plat_mono_ns() * 1e-9;
                 if (next == 0 || now > next + 0.25) next = now;
                 next += 1.0 / cap;
                 while (now < next) {
                     double left = next - now;
-                    if (left > 0.002) Sleep((DWORD)((left - 0.001) * 1000));
-                    QueryPerformanceCounter(&t);
-                    now = (double)t.QuadPart / (double)fq.QuadPart;
+                    if (left > 0.002) plat_sleep_ms((uint32_t)((left - 0.001) * 1000));
+                    now = (double)plat_mono_ns() * 1e-9;
                 }
             }
         }
-        pump();
+        vid_pump();
         audio_pump(cpu);
         scripted_keys(frames);
         if ((++frames % 600) == 1) klog("frame %u\n", frames);
@@ -578,18 +453,18 @@ static int sdl(rt_cpu *cpu, const char *n)
     if (!strcmp(n, "SDL_PollEvent")) {
         uint32_t ev = ARG(0);
         int have;
-        pump();
+        vid_pump();
         audio_pump(cpu);
-        AcquireSRWLockExclusive(&g_evlock);
+        plat_mutex_lock(&g_evlock);
         have = g_evh != g_evt;
         if (have && ev) { memcpy(RT_P(ev), g_evq[g_evh], 20); g_evh = (g_evh + 1) % QN; }
-        ReleaseSRWLockExclusive(&g_evlock);
+        plat_mutex_unlock(&g_evlock);
         RET(have);
     }
-    if (!strcmp(n, "SDL_PushEvent")) { push_event(RT_P(ARG(0))); RET(0); }
+    if (!strcmp(n, "SDL_PushEvent")) { host_push_event(RT_P(ARG(0))); RET(0); }
     if (!strcmp(n, "SDL_ShowCursor")) { game_select_input_maps(); RET(0); }
     if (!strcmp(n, "SDL_WM_SetCaption")) {
-        if (g_wnd && ARG(0)) SetWindowTextA(g_wnd, gstr(ARG(0)));
+        if (ARG(0)) vid_set_title(gstr(ARG(0)));
         RET(0);
     }
     if (!strcmp(n, "SDL_EnableKeyRepeat")) RET(0);
@@ -619,22 +494,36 @@ int host_impl(rt_cpu *cpu, const char *name)
     if (!strcmp(name, "glXSwapIntervalSGI") || !strcmp(name, "glXSwapIntervalMESA")) {
         /* the cabinet ran with vsync; JPRT_VSYNC=0 to run uncapped */
         g_swap_interval = getenv("JPRT_VSYNC") ? atoi(getenv("JPRT_VSYNC")) : (int)ARG(0);
-        apply_swap_interval();
+        vid_swap_interval(g_swap_interval);
         RET(0);
     }
     if (!strcmp(name, "glXGetProcAddressARB") || !strcmp(name, "glXGetProcAddress"))
         RET(host_thunk_addr(gstr(ARG(0))));
-    if (!strncmp(name, "gl", 2) && name[2] >= 'A' && name[2] <= 'Z') return gl_dispatch(cpu, name);
+    if (!strncmp(name, "gl", 2) && name[2] >= 'A' && name[2] <= 'Z' && name[2] != 'X') return gl_dispatch(cpu, name);
     if (!strcmp(name, "gluErrorString")) RET(guest_strdup("GLU error"));
     if (!strcmp(name, "gluBuild2DMipmaps")) {
-        static HMODULE glu;
-        int (GLAPI_CALL *f)(uint32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, const void *);
-        if (!glu) glu = LoadLibraryA("glu32.dll");
-        f = (void *)GetProcAddress(glu, "gluBuild2DMipmaps");
-        RET(f(ARG(0), (int32_t)ARG(1), (int32_t)ARG(2), (int32_t)ARG(3), ARG(4), ARG(5), GUEST_PTR(ARG(6))));
+        /* level 0 + glGenerateMipmap (portable; GLU is not on the Quest) */
+        uint32_t target = ARG(0), internal = ARG(1), format = ARG(4);
+        if (internal <= 4 || g_gles) internal = format;              /* legacy component counts / ES */
+        HGL(4014, "glTexImage2D", pf_teximage)(target, 0, (int32_t)internal, (int32_t)ARG(2), (int32_t)ARG(3), 0,
+                                               format, ARG(5), GUEST_PTR(ARG(6)));
+        HGL(4015, "glGenerateMipmap", pf_genmip)(target);
+        RET(0);
     }
     if (!strcmp(name, "glutBitmapCharacter")) RET(0);
     if (!strncmp(name, "udev_", 5)) RET(0);       /* no udev: gun/IO discovery finds nothing */
     if (!strcmp(name, "XOpenDisplay")) RET(0);
+    /* GLX queries the engine logs at start-up */
+    if (!strcmp(name, "glXGetCurrentDisplay")) RET(0xf0000e00u);
+    if (!strcmp(name, "glXQueryVersion")) {
+        if (ARG(1)) wr32(ARG(1), 1);
+        if (ARG(2)) wr32(ARG(2), 4);
+        RET(1);
+    }
+    if (!strcmp(name, "glXGetClientString")) {
+        static uint32_t vendor, version;
+        if (!vendor) { vendor = guest_strdup("NVIDIA Corporation"); version = guest_strdup("1.4"); }
+        RET(ARG(1) == 2 ? version : ARG(1) == 1 ? vendor : guest_strdup(""));
+    }
     return 0;
 }
