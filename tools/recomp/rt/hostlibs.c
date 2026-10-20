@@ -69,12 +69,45 @@ static LARGE_INTEGER g_t0, g_freq;
 static uint8_t g_evq[QN][20];
 static int g_evh, g_evt;
 
+static SRWLOCK g_evlock = SRWLOCK_INIT;   /* window/render thread pushes, io thread polls */
+
 static void push_event(const uint8_t *ev)
 {
-    int n = (g_evt + 1) % QN;
-    if (n == g_evh) return;
-    memcpy(g_evq[g_evt], ev, 20);
-    g_evt = n;
+    int n;
+    AcquireSRWLockExclusive(&g_evlock);
+    n = (g_evt + 1) % QN;
+    if (n != g_evh) {
+        memcpy(g_evq[g_evt], ev, 20);
+        g_evt = n;
+    }
+    ReleaseSRWLockExclusive(&g_evlock);
+}
+
+/* JPRT_KEYS="frame+sym,frame-sym,...": scripted SDL key down (+) / up (-)
+ * events at swap counts, for testing input without a person at the window;
+ * sym is a decimal SDLK value (2+ digits) or a single character. */
+static void scripted_keys(unsigned frame)
+{
+    static const char *p;
+    static int init;
+    if (!init) { init = 1; p = getenv("JPRT_KEYS"); }
+    while (p && *p) {
+        char *e;
+        unsigned long f = strtoul(p, &e, 10);
+        uint8_t ev[20] = { 0 };
+        uint32_t sym;
+        if (f > frame) return;
+        if (*e != '+' && *e != '-') { p = NULL; return; }
+        ev[0] = *e == '+' ? 2 : 3;
+        ev[2] = *e == '+';
+        e++;
+        if (e[0] >= '0' && e[0] <= '9' && e[1] >= '0' && e[1] <= '9') sym = (uint32_t)strtoul(e, &e, 10);
+        else sym = (uint8_t)*e++;
+        memcpy(ev + 8, &sym, 4);
+        push_event(ev);
+        klog("JPRT_KEYS: frame %u key %u %s\n", frame, sym, ev[0] == 2 ? "down" : "up");
+        p = *e == ',' ? e + 1 : e;
+    }
 }
 
 static uint32_t sdl_key(WPARAM vk)
@@ -320,15 +353,26 @@ static int gl_dispatch(rt_cpu *cpu, const char *name)
 }
 
 /* ---- SDL 1.2 ---- */
+int sdl_audio(rt_cpu *cpu, const char *n);      /* hostaudio.c */
+void audio_pump(rt_cpu *cpu);
+void game_select_input_maps(void);         /* hostgame.c */
+
+static uint32_t g_sdl_inited;
+
 static int sdl(rt_cpu *cpu, const char *n)
 {
+    if (sdl_audio(cpu, n)) return 1;
     if (!strcmp(n, "SDL_Init")) {
         QueryPerformanceFrequency(&g_freq);
         QueryPerformanceCounter(&g_t0);
         klog("SDL_Init(%#x)\n", ARG(0));
+        g_sdl_inited |= ARG(0) & 0xffffu;
         RET(0);
     }
-    if (!strcmp(n, "SDL_WasInit")) RET(ARG(0));
+    if (!strcmp(n, "SDL_InitSubSystem")) { g_sdl_inited |= ARG(0) & 0xffffu; RET(0); }
+    /* subsystems only: io_sdl_init asks WasInit(SDL_INIT_NOPARACHUTE) and
+     * enables the keyboard/mouse driver only when that is 0 */
+    if (!strcmp(n, "SDL_WasInit")) RET(g_sdl_inited & ARG(0));
     if (!strcmp(n, "SDL_Quit")) RET(0);
     if (!strcmp(n, "SDL_GetTicks")) {
         LARGE_INTEGER t;
@@ -336,7 +380,7 @@ static int sdl(rt_cpu *cpu, const char *n)
         QueryPerformanceCounter(&t);
         RET((uint32_t)((t.QuadPart - g_t0.QuadPart) * 1000 / g_freq.QuadPart));
     }
-    if (!strcmp(n, "SDL_Delay")) { Sleep(ARG(0)); pump(); RET(0); }
+    if (!strcmp(n, "SDL_Delay")) { Sleep(ARG(0)); pump(); audio_pump(cpu); RET(0); }
     if (!strcmp(n, "SDL_GetError") || !strcmp(n, "SDL_Error")) {
         if (!g_errstr) g_errstr = guest_strdup("unsupported in the recompiled build");
         RET(g_errstr);
@@ -430,18 +474,24 @@ static int sdl(rt_cpu *cpu, const char *n)
             }
         }
         pump();
+        audio_pump(cpu);
+        scripted_keys(frames);
         if ((++frames % 600) == 1) klog("frame %u\n", frames);
         RET(0);
     }
     if (!strcmp(n, "SDL_PollEvent")) {
         uint32_t ev = ARG(0);
+        int have;
         pump();
-        if (g_evh == g_evt) RET(0);
-        if (ev) { memcpy(RT_P(ev), g_evq[g_evh], 20); g_evh = (g_evh + 1) % QN; }
-        RET(1);
+        audio_pump(cpu);
+        AcquireSRWLockExclusive(&g_evlock);
+        have = g_evh != g_evt;
+        if (have && ev) { memcpy(RT_P(ev), g_evq[g_evh], 20); g_evh = (g_evh + 1) % QN; }
+        ReleaseSRWLockExclusive(&g_evlock);
+        RET(have);
     }
     if (!strcmp(n, "SDL_PushEvent")) { push_event(RT_P(ARG(0))); RET(0); }
-    if (!strcmp(n, "SDL_ShowCursor")) RET(0);
+    if (!strcmp(n, "SDL_ShowCursor")) { game_select_input_maps(); RET(0); }
     if (!strcmp(n, "SDL_WM_SetCaption")) {
         if (g_wnd && ARG(0)) SetWindowTextA(g_wnd, gstr(ARG(0)));
         RET(0);
@@ -455,9 +505,6 @@ static int sdl(rt_cpu *cpu, const char *n)
     if (!strcmp(n, "SDL_NumJoysticks")) RET(0);
     if (!strcmp(n, "SDL_JoystickOpen")) RET(0);
     if (!strcmp(n, "SDL_JoystickEventState")) RET(0);
-    if (!strcmp(n, "SDL_OpenAudio")) { klog("SDL_OpenAudio: no audio yet (fails)\n"); RET(-1); }
-    if (!strcmp(n, "SDL_PauseAudio") || !strcmp(n, "SDL_CloseAudio") || !strcmp(n, "SDL_LockAudio") ||
-        !strcmp(n, "SDL_UnlockAudio")) RET(0);
     if (!strcmp(n, "SDL_LoadObject")) {
         const char *lib = gstr(ARG(0));
         klog("SDL_LoadObject(%s): host replacement\n", lib ? lib : "(null)");

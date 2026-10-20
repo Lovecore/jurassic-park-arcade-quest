@@ -198,3 +198,20 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
         kfatal(cpu, "rt_host_fn: no host implementation for %08x", addr);
     }
 }
+
+/* ---- input maps ----
+ * main() clears a developer flag (0x8db4e38) that ParseCommandLineArgs
+ * never sets. When it is set, GameInputMaps installs the keyboard/mouse
+ * maps (mouse x/y -> P1 aim, buttons -> triggers, keys q 4 w 5 , e . r)
+ * and GameSetVariableInputMaps leaves them alone; the io_sdl driver feeds
+ * them. Called from SDL_ShowCursor (WndShowCursor runs just before
+ * GameInputMaps). JPRT_INPUT=rio keeps the cabinet maps. */
+#define KEYBOARD_MAPS_FLAG 0x8db4e38u
+
+void game_select_input_maps(void)
+{
+    const char *m = getenv("JPRT_INPUT");
+    if (m && !strcmp(m, "rio")) return;
+    if (!rd32(KEYBOARD_MAPS_FLAG)) klog("input: developer keyboard/mouse maps selected\n");
+    wr32(KEYBOARD_MAPS_FLAG, 1);
+}

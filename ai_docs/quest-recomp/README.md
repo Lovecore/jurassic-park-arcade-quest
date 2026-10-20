@@ -341,3 +341,42 @@ build (`ai_docs/windows-pc`) feeds R5 directly.
   the title cards and the in-engine gun demo (lasers, targets, HUD).
 - Still unimplemented: SDL_RWFromFile (audio path), and the glX query
   stubs (glXGetCurrentDisplay, glXQueryVersion, glXGetClientString).
+
+### 2026-10-20 (cont.) — milestone: audio and playable input
+- Audio (`rt/hostaudio.c`): SDL_mixer is statically linked into the game,
+  so it runs as lifted code. The host supplies SDL 1.2 audio
+  (OpenAudio/Lock/Pause/MixAudio), WAV loading, AudioCVT conversion, and
+  file RWops. RWops function pointers are host thunks the guest can call.
+  WAV buffers come from the guest's own libc malloc (SDL_mixer frees them
+  with SDL_free). The guest callback runs on the game's own threads:
+  audio_pump() is called from SwapBuffers, Delay and PollEvent and
+  refills winmm waveOut buffers (6 x 512 frames, about 70 ms).
+  `JPRT_AUDIO=0` disables audio; `JPRT_AUDIO_DUMP=f.raw` records the
+  output. All 832 WAVs are PCM, and the music is OGG (decoded by lifted
+  code through RWops). The gamelog shows
+  "SDL_Mixer - opened ... 44100Hz S16LSB 2ch", and the sound asserts are gone.
+- Input:
+  - The io library has eight drivers. Each one's mask bit is in the
+    table at 0x8b26a80 (20-byte entries). io_sdl is bit 0x200 and
+    GameSetup always requests it.
+  - io_sdl_init skips itself when `SDL_WasInit(SDL_INIT_NOPARACHUTE)` is
+    nonzero, and our stub returned its argument. Fixed:
+    WasInit = initialized subsystems & arg.
+  - io_sdl fills per-keysym records. Input IDs 0..0x142 are SDL keysyms;
+    0x144/0x145 are mouse x/y and 0x146/0x147 are mouse buttons (jump
+    table 0x8995960 in io_get_input_digital).
+  - main() clears 0x8db4e38, a developer flag that ParseCommandLineArgs
+    never sets. When it is set, GameInputMaps (0x81bbf60) installs
+    keyboard/mouse maps and GameSetVariableInputMaps leaves them alone.
+    The host sets it from SDL_ShowCursor, which WndShowCursor calls just
+    before GameInputMaps; `JPRT_INPUT=rio` keeps the cabinet maps.
+  - Map (source → logical): mouse x/y → 0x14b/0x14c (P1 aim);
+    LMB → 0x14d (P1 trigger); RMB → 0x157; `q` → 0x14e; `4` → 0x14f
+    (P1 start, confirmed); `w` → 0x158; `5` → 0x159 (P2 start,
+    confirmed); `,` → 0x161; `e` → 0x162; `.` → 0x16b; `r` → 0x16c.
+  - `JPRT_KEYS="frame+sym,frame-sym,..."` scripts key events for
+    unattended tests.
+- Result: under scripted keys, the recompiled game goes from attract mode
+  → "Player 1 joined" / "Player 2 joined" → level_tricera, with the
+  in-game HUD (`recompiled-gameplay-2026-10-20.png`). The cabinet
+  setting is free play.
