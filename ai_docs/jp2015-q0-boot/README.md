@@ -23,7 +23,7 @@ been measured yet.
 
 ### 2026-10-19
 
-- Picked up from the Kimi session export (`kimi-export-session_-20261019-201710.md`).
+- Picked up from an earlier session (notes not kept in the repo).
   State there: boot crashed in the GOT-repair trap at slot `0x8add910`.
 - Fixed shim build: `trap_log` was dropped as unused (only called from
   inline asm) -> `__attribute__((used, visibility("hidden")))`.
