@@ -171,4 +171,7 @@ void vid_screen_size(int *w, int *h)
     *w = GetSystemMetrics(SM_CXSCREEN);
     *h = GetSystemMetrics(SM_CYSCREEN);
 }
+
+/* stereo: no head tracking on the desktop */
+void vid_head_orientation(float q[4]) { q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f; }
 #endif

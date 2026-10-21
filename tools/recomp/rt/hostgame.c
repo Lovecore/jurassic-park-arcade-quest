@@ -23,6 +23,10 @@
 #include "rt.h"
 #include "kernel.h"
 #include "plat.h"
+#include "video.h"
+
+void fo_08305bc0(rt_cpu *cpu);                 /* RenderLoop_RenderLayer, lifted (wrap) */
+void fo_081b9c10(rt_cpu *cpu);                 /* ParseCommandLineArgs, lifted (host_funcs.txt: wrap) */
 
 #define ARG(i) rd32(cpu->esp + 4 + 4 * (i))
 #define RET(v) do { cpu->eax = (uint32_t)(v); cpu->esp += 4; return; } while (0)
@@ -274,6 +278,64 @@ static void job_flush(rt_cpu *cpu, int then_call)
     cpu->esp = esp0;
 }
 
+/* ---- stereo: the engine's Oculus DK2 path (display mode 2) ----
+ * GameSysStart writes the mode default (0) to 0x8db4e6c, calls
+ * ParseCommandLineArgs (0x81b9c10, which can only pick 0 or 1) and then
+ * branches on it; mode 2 calls VidOVRInit / VidOVRGetResolution and the
+ * renderer draws both eyes side by side through layer setup
+ * gRenderLayerSetupDataOVR and shaderOVR (lens warp). The VidOVR functions
+ * were empty stubs in the cabinet build; these give the engine a "3D
+ * screen" headset: two eyes of the game's own size side by side, parallel
+ * cameras an IPD apart, no lens warp (identity distortion parameters). */
+#define GAME_DISPLAY_MODE 0x8db4e6cu
+#define RENDER_LAYERS 0x8e249e0u            /* gRenderLayerSetupData: 8 layers */
+extern int g_vp_shift_x;                    /* hostlibs.c */
+#define RENDER_LAYER_SIZE 0x9becu
+#define RENDER_LAYER_RENDER 0x8302210u      /* RenderLayerRender(layer data, screen) */
+
+int g_stereo = -1;                             /* JPRT_STEREO; video_*.c reads it */
+static float g_stereo_ipd = 0.064f, g_stereo_yfov = 60.0f;
+
+int stereo_enabled(void)
+{
+    if (g_stereo < 0) {
+        g_stereo = getenv("JPRT_STEREO") ? atoi(getenv("JPRT_STEREO")) : 0;
+        if (getenv("JPRT_IPD")) g_stereo_ipd = (float)atof(getenv("JPRT_IPD"));
+        if (getenv("JPRT_YFOV")) g_stereo_yfov = (float)atof(getenv("JPRT_YFOV"));
+    }
+    return g_stereo;
+}
+
+/* one eye: the cabinet's 1360x768 unless JPRT_EYE_W / JPRT_EYE_H */
+void stereo_eye_size(int *w, int *h)
+{
+    *w = getenv("JPRT_EYE_W") ? atoi(getenv("JPRT_EYE_W")) : 1360;
+    *h = getenv("JPRT_EYE_H") ? atoi(getenv("JPRT_EYE_H")) : 768;
+}
+
+static void wrf(uint32_t a, float v) { wrf32(a, v); }
+
+static void vidovr_sconfig(rt_cpu *cpu)
+{
+    /* (screen, LensCenter[2], ScreenCenter[2], Scale[2], ScaleIn[2],
+     *  HmdWarpParam[4], ChromAbParam[4], view[16], texm[16]): identity warp.
+     * shaderOVR works in one eye's 0..1 coordinates: tc = LensCenter +
+     * Scale * ScaleIn * (in - LensCenter) * warp(r), black outside
+     * ScreenCenter +- 0.5; so centre 0.5, Scale * ScaleIn = 1, warp = 1 */
+    uint32_t lc = ARG(1), sc = ARG(2), s = ARG(3), si = ARG(4), hw = ARG(5), ca = ARG(6);
+    uint32_t view = ARG(7), texm = ARG(8), i;
+    wrf(lc, 0.5f); wrf(lc + 4, 0.5f);
+    wrf(sc, 0.5f); wrf(sc + 4, 0.5f);
+    wrf(s, 0.5f); wrf(s + 4, 0.5f);
+    wrf(si, 2.0f); wrf(si + 4, 2.0f);
+    wrf(hw, 1.0f); wrf(hw + 4, 0.0f); wrf(hw + 8, 0.0f); wrf(hw + 12, 0.0f);
+    wrf(ca, 1.0f); wrf(ca + 4, 0.0f); wrf(ca + 8, 1.0f); wrf(ca + 12, 0.0f);
+    for (i = 0; i < 16; i++) {
+        wrf(view + 4 * i, i % 5 == 0 ? 1.0f : 0.0f);
+        wrf(texm + 4 * i, i % 5 == 0 ? 1.0f : 0.0f);
+    }
+}
+
 /* ---- RIO ---- */
 #define RIO_CONNECTED_FLAG 0x8e7d61cu
 
@@ -317,6 +379,65 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
         RET(0);
     case 0x836b2a6: wr32(RIO_CONNECTED_FLAG, 0); RET(0);
     case 0x836b33a: case 0x836b4bd: RET(0);           /* RIO_SendReport / RIO_GetReport */
+    case 0x81b9c10:                                   /* ParseCommandLineArgs (wrapped) */
+        fo_081b9c10(cpu);                             /* the game's own; returns to its caller */
+        if (stereo_enabled()) {
+            klog("stereo: display mode 2 (engine OVR path), ipd %.3f, yfov %.1f\n", g_stereo_ipd, g_stereo_yfov);
+            wr32(GAME_DISPLAY_MODE, 2);
+        }
+        return;
+    case 0x8305bc0:                                   /* RenderLoop_RenderLayer(layer, screen) (wrapped) */
+        /* mode 2's render loop draws only layer 0 (per eye) and then
+         * layer 7 (screen -1): the 2D layers 1-6 (HUD, logos, attract
+         * text) are skipped. Draw them here first. */
+        if (stereo_enabled() && ARG(0) == 7 && ARG(1) == 0xffffffffu) {
+            /* the 2D layers once per eye, as in mono over the whole
+             * (one-eye) display: screen -1, the viewport placed in that
+             * eye's half of the framebuffer (hostlibs.c g_vp_shift_x) */
+            uint32_t k, e;
+            int ew, eh;
+            stereo_eye_size(&ew, &eh);
+            for (e = 0; e < 2; e++) {
+                g_vp_shift_x = (int)e * ew;
+                for (k = 1; k <= 6; k++) {
+                    uint32_t a[2] = { RENDER_LAYERS + k * RENDER_LAYER_SIZE, 0xffffffffu };
+                    guest_call(cpu, RENDER_LAYER_RENDER, 2, a);
+                }
+                g_vp_shift_x = -1;
+            }
+        }
+        fo_08305bc0(cpu);
+        return;
+    case 0x835dfa0: klog("VidOVRInit\n"); RET(0);
+    case 0x835dfb0: RET(0);                           /* VidOVRShutdown */
+    case 0x835dfc0: {                                 /* VidOVRGetResolution(int *w, int *h): both eyes */
+        int w = 1360, h = 768;
+        stereo_eye_size(&w, &h);
+        /* one eye: the engine then splits it into two 680-wide screens,
+         * which hostlibs.c widens to two full eyes in the framebuffer */
+        wr32(ARG(0), (uint32_t)w);
+        wr32(ARG(1), (uint32_t)h);
+        klog("VidOVRGetResolution -> %dx%d per eye\n", w, h);
+        RET(0);
+    }
+    case 0x835dfd0: {                                 /* VidOVRGetProjParams(float *yfov, *aspect, *offset) */
+        int w = 1360, h = 768;
+        stereo_eye_size(&w, &h);
+        wrf(ARG(0), g_stereo_yfov);
+        wrf(ARG(1), (float)w / (float)h);
+        wrf(ARG(2), 0.0f);                            /* parallel eyes, centred projections */
+        RET(0);
+    }
+    case 0x835dfe0:                                   /* float VidOVRGetIPDistance(void): in st(0) */
+        fpush(cpu, (rt_x87)g_stereo_ipd);
+        RET(0);
+    case 0x835dff0: {                                 /* VidOVRGetOrientation(float quat[4]): x y z w */
+        float q[4] = { 0, 0, 0, 1 };
+        vid_head_orientation(q);
+        wrf(ARG(0), q[0]); wrf(ARG(0) + 4, q[1]); wrf(ARG(0) + 8, q[2]); wrf(ARG(0) + 12, q[3]);
+        RET(0);
+    }
+    case 0x835e000: vidovr_sconfig(cpu); RET(0);      /* VidOVRGetSConfigParams */
     case 0x835c870: job_worker(cpu); RET(0);          /* JobWorker(arg) */
     case 0x835ca20: RET(job_submit(cpu));             /* JobSubmit(fn, arg, tag) */
     case 0x835caf0: job_flush(cpu, 0); RET(0);        /* JobFlush(help) */

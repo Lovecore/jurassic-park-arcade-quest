@@ -110,6 +110,7 @@ static inline int plat_atomic_cas(volatile int32_t *p, int32_t expect, int32_t v
 
 /* ---- time ---- */
 uint64_t plat_mono_ns(void);              /* monotonic clock */
+uint64_t plat_thread_cpu_ns(void);        /* CPU time of the calling thread */
 int64_t plat_real_ns(void);               /* wall clock, ns since the Unix epoch */
 void plat_sleep_ms(uint32_t ms);
 void plat_yield(void);

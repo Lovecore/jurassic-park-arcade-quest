@@ -57,7 +57,7 @@ static EGLContext g_ctx = EGL_NO_CONTEXT;
 static EGLConfig g_cfg;
 static EGLSurface g_pbuf = EGL_NO_SURFACE;
 static GLuint g_fbo, g_color, g_depth;
-static int g_w, g_h, g_ready;
+static int g_ready;
 
 static XrInstance g_inst = XR_NULL_HANDLE;
 static XrSystemId g_sys;
@@ -74,6 +74,10 @@ static XrPosef g_screen;                      /* screen quad pose in LOCAL space
 static float g_screen_w = 2.4f, g_screen_h;
 static int g_layer_settings;                  /* XR_FB_composition_layer_settings */
 static int g_perf_settings;                   /* XR_EXT_performance_settings */
+
+static int g_w, g_h;                          /* the game's framebuffer (both eyes in stereo) */
+/* the width of what one eye sees on the screen quad */
+static int screen_px_w(void) { return stereo_enabled() ? g_w / 2 : g_w; }
 static uint32_t g_sc_mips = 1;
 
 /* input */
@@ -310,7 +314,7 @@ static int xr_init_session(void)
     g_screen.orientation.w = 1;
     g_screen.position.z = -2.4f;
     if (getenv("JPRT_SCREEN_W") && atof(getenv("JPRT_SCREEN_W")) > 0.1) g_screen_w = (float)atof(getenv("JPRT_SCREEN_W"));
-    g_screen_h = g_screen_w * (float)g_h / (float)g_w;
+    g_screen_h = g_screen_w * (float)g_h / (float)screen_px_w();
     klog("openxr: session up, swapchain %ux%u format %#llx, %u images, %u mips, screen %.2f m\n", g_w, g_h,
          (long long)fmt, g_sc_n, g_sc_mips, g_screen_w);
     if (g_perf_settings) {   /* the recompiled game wants every cycle: sustained high clocks */
@@ -368,6 +372,7 @@ uint32_t vid_default_fbo(void) { return g_fbo; }
 void vid_set_title(const char *t) { (void)t; }
 void vid_swap_interval(int n) { (void)n; }    /* xrWaitFrame paces */
 void vid_screen_size(int *w, int *h) { *w = g_w ? g_w : 1360; *h = g_h ? g_h : 768; }
+void vid_head_orientation(float q[4]) { q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f; }   /* stage 2: a 3D screen, no head tracking */
 
 void *vid_gl_proc(const char *name)
 {
@@ -446,7 +451,7 @@ static int aim_hit(int i, XrTime t, int *px, int *py)
     u = (o.x + k * d.x - g_screen.position.x) / g_screen_w + 0.5f;
     v = 0.5f - (o.y + k * d.y - g_screen.position.y) / g_screen_h;
     if (u < -0.1f || u > 1.1f || v < -0.1f || v > 1.1f) return 0;
-    *px = (int)(fminf(fmaxf(u, 0.f), 1.f) * (float)(g_w - 1));
+    *px = (int)(fminf(fmaxf(u, 0.f), 1.f) * (float)(screen_px_w() - 1));
     *py = (int)(fminf(fmaxf(v, 0.f), 1.f) * (float)(g_h - 1));
     return 1;
 }
@@ -507,7 +512,7 @@ static void poll_input(XrTime t)
             if (dt > 0.1f) dt = 0.1f;
             g_screen_w *= 1.f + st.currentState * 0.5f * dt;
             g_screen_w = fminf(fmaxf(g_screen_w, 1.2f), 4.8f);
-            g_screen_h = g_screen_w * (float)g_h / (float)g_w;
+            g_screen_h = g_screen_w * (float)g_h / (float)screen_px_w();
         }
         last = t;
     }
@@ -609,8 +614,8 @@ void vid_present(void)
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
     XrFrameBeginInfo bi = { XR_TYPE_FRAME_BEGIN_INFO };
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
-    XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    const XrCompositionLayerBaseHeader *layers[1];
+    XrCompositionLayerQuad quad[2] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    const XrCompositionLayerBaseHeader *layers[2];
     static int centred;
     if (!g_ready) return;
     if (g_flat) { flat_present(); return; }
@@ -680,23 +685,32 @@ void vid_present(void)
                 if (e && checked++ < 3) klog("openxr: frame copy GL error %#x\n", e);
             }
             xrReleaseSwapchainImage(g_sc, &ri);
-            quad.space = g_local;
-            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage.swapchain = g_sc;
-            quad.subImage.imageRect.extent.width = g_w;
-            quad.subImage.imageRect.extent.height = g_h;
-            quad.pose = g_screen;
-            quad.size.width = g_screen_w;
-            quad.size.height = g_screen_h;
-            if (g_layer_settings) {
-                static XrCompositionLayerSettingsFB ls = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
-                ls.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
-                                XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
-                quad.next = &ls;
+            /* mono: one screen for both eyes; stereo: the frame holds both
+             * eyes side by side, each eye's layer shows its own half */
+            {
+                int n = stereo_enabled() ? 2 : 1, e;
+                for (e = 0; e < n; e++) {
+                    quad[e].space = g_local;
+                    quad[e].eyeVisibility = n == 1 ? XR_EYE_VISIBILITY_BOTH
+                                                   : e == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+                    quad[e].subImage.swapchain = g_sc;
+                    quad[e].subImage.imageRect.offset.x = e * screen_px_w();
+                    quad[e].subImage.imageRect.extent.width = screen_px_w();
+                    quad[e].subImage.imageRect.extent.height = g_h;
+                    quad[e].pose = g_screen;
+                    quad[e].size.width = g_screen_w;
+                    quad[e].size.height = g_screen_h;
+                    if (g_layer_settings) {
+                        static XrCompositionLayerSettingsFB ls = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
+                        ls.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                        XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+                        quad[e].next = &ls;
+                    }
+                    layers[e] = (const XrCompositionLayerBaseHeader *)&quad[e];
+                }
+                ei.layerCount = (uint32_t)n;
+                ei.layers = layers;
             }
-            layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
-            ei.layerCount = 1;
-            ei.layers = layers;
         }
     }
     xrEndFrame(g_sess, &ei);

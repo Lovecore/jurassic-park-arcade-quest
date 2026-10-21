@@ -16,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include "rt.h"
 #include "kernel.h"
 #include "gl_host.h"
@@ -256,10 +255,40 @@ static void gl_trace(const char *name)
 void gl_census(rt_cpu *cpu, const char *n);      /* gles.c */
 int gles_manual(rt_cpu *cpu, const char *n);
 
+int g_vp_shift_x = -1;                        /* hostgame.c: stereo 2D pass: the eye's x offset (-1: none) */
+unsigned g_frame_no;                          /* swaps so far */
+
 static int gl_dispatch_inner(rt_cpu *cpu, const char *name)
 {
     int lo, hi;
     gl_trace(name);
+    {   /* JPRT_VPLOG=<frame>: that frame's targets, viewports, clears and draws */
+        static int log = -2;
+        if (log == -2) log = getenv("JPRT_VPLOG") ? atoi(getenv("JPRT_VPLOG")) : -1;
+        if (log >= 0 && g_frame_no == (unsigned)log &&
+            (!strcmp(name, "glViewport") || !strcmp(name, "glScissor") || !strcmp(name, "glBindFramebuffer") ||
+             !strcmp(name, "glClear") || !strncmp(name, "glDraw", 6) || !strcmp(name, "glUseProgram") ||
+             !strcmp(name, "glBindTexture")))
+            klog("%s(%d, %d, %d, %d) shift %d [from %08x]\n", name, (int)ARG(0), (int)ARG(1), (int)ARG(2), (int)ARG(3),
+                 g_vp_shift_x, rd32(cpu->esp));
+    }
+    if (((name[2] == 'V' && !strcmp(name, "glViewport")) || (name[2] == 'S' && !strcmp(name, "glScissor"))) &&
+        stereo_enabled()) {
+        /* stereo: the engine sees a one-eye display (two 680-wide
+         * "screens") while the window framebuffer holds two full eyes side
+         * by side: rectangles on it are doubled horizontally, except in the
+         * 2D overlay pass, which draws one eye at a time (g_vp_shift_x) */
+        int32_t fb = 0;
+        HGL(4010, "glGetIntegerv", pf_getintegerv)(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
+        if ((uint32_t)fb == vid_default_fbo()) {
+            if (g_vp_shift_x >= 0) {
+                wr32(cpu->esp + 4, ARG(0) + (uint32_t)g_vp_shift_x);   /* in the caller's arg slots */
+            } else {
+                wr32(cpu->esp + 4, ARG(0) * 2);
+                wr32(cpu->esp + 12, ARG(2) * 2);
+            }
+        }
+    }
     gl_census(cpu, name);
     if (gles_manual(cpu, name)) return 1;
     if (gl_manual(cpu, name)) return 1;
@@ -368,7 +397,9 @@ static int sdl(rt_cpu *cpu, const char *n)
                  (unsigned long long)plat_thread_id());
             if (w) g_w = (int)w;
             if (h) g_h = (int)h;
-            if (vid_create(g_w, g_h) < 0) RET(0);
+            /* stereo: the window holds both eyes side by side (the
+             * engine sees one eye: VidOVRGetResolution) */
+            if (vid_create(stereo_enabled() ? 2 * g_w : g_w, g_h) < 0) RET(0);
             vid_swap_interval(g_swap_interval);
         }
         if (!g_surface && vid_ready()) {
@@ -403,7 +434,7 @@ static int sdl(rt_cpu *cpu, const char *n)
         if (shot_every < 0) shot_every = getenv("JPRT_SHOT_EVERY") ? atoi(getenv("JPRT_SHOT_EVERY")) : 0;
         if (shot_every > 0 && frames % (unsigned)shot_every == 0 && shots < 64 && vid_ready()) {
             /* the game's own back buffer -> BMP (never the screen) */
-            int w = g_w, h = g_h, stride = (w * 3 + 3) & ~3, y;
+            int w = stereo_enabled() ? 2 * g_w : g_w, h = g_h, stride = (w * 3 + 3) & ~3, y;
             uint8_t *px = malloc((size_t)stride * h);
             char path[64];
             FILE *f;
@@ -438,9 +469,7 @@ static int sdl(rt_cpu *cpu, const char *n)
         static uint64_t t_out, work_sum, work_max, pres_sum, cpu_out, cpu_sum, cpu_max;
         static unsigned slow;
         uint64_t t_in = plat_mono_ns(), work = t_out ? t_in - t_out : 0, cpu_in, cw;
-        struct timespec ts;
-        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);   /* this thread's CPU time: no waits or sleeps */
-        cpu_in = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+        cpu_in = plat_thread_cpu_ns();               /* this thread's CPU time: no waits or sleeps */
         cw = cpu_out ? cpu_in - cpu_out : 0;
         cpu_sum += cw;
         if (cw > cpu_max) cpu_max = cw;
@@ -473,6 +502,7 @@ static int sdl(rt_cpu *cpu, const char *n)
         vid_pump();
         audio_pump(cpu);
         scripted_keys(frames);
+        g_frame_no = frames + 1;
         if ((++frames % 600) == 1) {
             static uint64_t t0;
             uint64_t t = plat_mono_ns();
@@ -486,11 +516,7 @@ static int sdl(rt_cpu *cpu, const char *n)
             slow = 0;
         }
         t_out = plat_mono_ns();
-        {
-            struct timespec te;
-            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &te);
-            cpu_out = (uint64_t)te.tv_sec * 1000000000u + (uint64_t)te.tv_nsec;
-        }
+        cpu_out = plat_thread_cpu_ns();
         RET(0);
     }
     if (!strcmp(n, "SDL_PollEvent")) {

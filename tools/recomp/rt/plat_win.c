@@ -14,6 +14,14 @@ uint64_t plat_mono_ns(void)
     return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
 }
 
+uint64_t plat_thread_cpu_ns(void)
+{
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    return ((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) +
+            (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) * 100u;
+}
+
 int64_t plat_real_ns(void)
 {
     FILETIME ft;

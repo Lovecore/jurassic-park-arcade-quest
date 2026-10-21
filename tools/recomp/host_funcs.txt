@@ -25,3 +25,14 @@
 0835ca20 JobSubmit
 0835caf0 JobFlush
 0835cbb0 JobFlushAndFinish
+# Stereo (JPRT_STEREO=1): the engine's Oculus DK2 path. ParseCommandLineArgs is
+# wrapped to set display mode 2; the VidOVR stubs become a 3D-screen "headset"
+081b9c10 ParseCommandLineArgs wrap
+0835dfa0 VidOVRInit
+0835dfb0 VidOVRShutdown
+0835dfc0 VidOVRGetResolution
+0835dfd0 VidOVRGetProjParams
+0835dfe0 VidOVRGetIPDistance
+0835dff0 VidOVRGetOrientation
+0835e000 VidOVRGetSConfigParams
+08305bc0 RenderLoop_RenderLayer wrap

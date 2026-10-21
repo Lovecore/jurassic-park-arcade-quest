@@ -20,6 +20,12 @@ void vid_screen_size(int *w, int *h);
 uint32_t vid_default_fbo(void);
 void vid_log_context(void);
 
+/* stereo (hostgame.c, JPRT_STEREO): the engine renders both eyes side by
+ * side into the default framebuffer, each eye w x h */
+int stereo_enabled(void);
+void stereo_eye_size(int *w, int *h);
+void vid_head_orientation(float q[4]);  /* x y z w, the engine's camera frame */
+
 /* hostlibs.c: queue a guest SDL_Event (20 bytes) */
 void host_push_event(const uint8_t *ev);
 
