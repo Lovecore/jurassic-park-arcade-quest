@@ -42,7 +42,27 @@ VR, played with the Touch controllers, at a steady 72 fps.
 
 ## How it works
 
-```mermaid<br/>flowchart LR<br/>    subgraph Offline["On the PC (build time)"]<br/>        ELF["game ELF + i386 .so files\n(your own copy)"] --> D["discover.py\nfunction discovery"]<br/>        D --> L["lift.py\nx86 -> C"]<br/>        L --> C["generated C\n38,285 functions"]<br/>        C --> NDK["Android NDK\nclang -O2, arm64"]<br/>        RT["runtime rt/*.c"] --> NDK<br/>        NDK --> APK["jp2015vr.apk"]<br/>    end<br/>    subgraph Quest["On the Quest 3 (run time)"]<br/>        APK --> K["emulated i386 Linux kernel\nsyscalls, threads, futex, mmap"]<br/>        K --> G["recompiled game + libraries"]<br/>        G --> SDL["host SDL 1.2 / GL / audio"]<br/>        SDL --> GLES["GL -> GLES 3.2\nGLSL -> GLSL ES"]<br/>        SDL --> AA["AAudio"]<br/>        GLES --> XR["OpenXR quad layer\nthe cinema screen"]<br/>        IN["Touch controllers"] --> SDL<br/>    end<br/>    DATA["game data, copied once\n(/sdcard/Android/data)"] --> G<br/>```
+```mermaid
+flowchart LR
+    subgraph Offline["On the PC (build time)"]
+        ELF["game ELF + i386 .so files<br/>(your own copy)"] --> D["discover.py<br/>function discovery"]
+        D --> L["lift.py<br/>x86 to C"]
+        L --> C["generated C<br/>38,285 functions"]
+        C --> NDK["Android NDK<br/>clang -O2, arm64"]
+        RT["runtime rt/*.c"] --> NDK
+        NDK --> APK["jp2015vr.apk"]
+    end
+    subgraph Quest["On the Quest 3 (run time)"]
+        APK --> K["emulated i386 Linux kernel<br/>syscalls, threads, futex, mmap"]
+        K --> G["recompiled game + libraries"]
+        G --> SDL["host SDL 1.2 / GL / audio"]
+        SDL --> GLES["GL to GLES 3.2<br/>GLSL to GLSL ES"]
+        SDL --> AA["AAudio"]
+        GLES --> XR["OpenXR quad layer<br/>the cinema screen"]
+        IN["Touch controllers"] --> SDL
+    end
+    DATA["game data, copied once<br/>(/sdcard/Android/data)"] --> G
+```
 
 1. **Discovery and lifting.** `discover.py` finds every function in each
    module (symbols, call targets, jump tables, exception tables), and
