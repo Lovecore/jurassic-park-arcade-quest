@@ -15,8 +15,9 @@ VR, played with the Touch controllers, at a steady 72 fps.
 | ![Gameplay on the Quest 3](ai_docs/quest-recomp/quest3-gameplay-2026-10-21.jpg) | ![Mission select on the Quest 3](ai_docs/quest-recomp/quest3-mission-select-2026-10-21.jpg) |
 
 > This repo contains **no game files**. You need your own copy of the game;
-> the tools read it from a local folder and nothing from it is committed or
-> packaged.
+> the tools read it from a local folder and nothing from it is committed.
+> Note that the APK you build *does* contain the game's code (recompiled),
+> so the APK is for your own headset only: do not share it.
 
 ## Highlights
 
@@ -144,6 +145,7 @@ controller, and more CPU headroom (multi-core guest threads, `-O3`/LTO).
 
 A personal interoperability project, built and tested on owned hardware
 with an owned copy of the game. No game code, data or patched binaries are
-in this repository or in its build outputs' sources; do not redistribute
-game files. *Jurassic Park* is a trademark of Universal; the game is by
+in this repository. The built APK contains the game's code in recompiled
+form, so neither it nor the game files may be redistributed without the
+rights holders' permission. *Jurassic Park* is a trademark of Universal; the game is by
 Raw Thrills. This project is not affiliated with either.

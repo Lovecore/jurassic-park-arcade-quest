@@ -1,7 +1,8 @@
 # Quest 3 build of the recompiled game
 
 The APK runs the statically recompiled arcade process (`tools/recomp`). It
-contains no game files: you push your own copy of the game to the headset.
+contains the game's code in recompiled form (so it is for your own headset
+only) but none of its data: you push your own copy of the game to it.
 
 ## What it does
 
