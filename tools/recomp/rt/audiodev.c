@@ -67,6 +67,8 @@ void adev_submit(const void *data)
     }
 }
 
+void adev_restart(void) {}
+
 void adev_close(void)
 {
     int i;
@@ -113,20 +115,47 @@ static aaudio_data_callback_result_t data_cb(AAudioStream *st, void *user, void 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int nbuf)
+static uint32_t g_freq;
+static _Atomic int g_restart;                 /* reopen the stream on the next pump */
+
+static void error_cb(AAudioStream *st, void *user, aaudio_result_t err)
+{
+    (void)st; (void)user;
+    klog("audio: stream error %d: reopening\n", (int)err);
+    atomic_store(&g_restart, 1);              /* not from this callback (AAudio rule) */
+}
+
+static int open_stream(void)
 {
     AAudioStreamBuilder *b;
-    int32_t chunk_frames;
-    if (bits != 16) return -1;
     if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return -1;
-    AAudioStreamBuilder_setSampleRate(b, (int32_t)freq);
-    AAudioStreamBuilder_setChannelCount(b, channels);
+    AAudioStreamBuilder_setSampleRate(b, (int32_t)g_freq);
+    AAudioStreamBuilder_setChannelCount(b, g_ch);
     AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_GAME);
     AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_MUSIC);
     AAudioStreamBuilder_setDataCallback(b, data_cb, NULL);
+    AAudioStreamBuilder_setErrorCallback(b, error_cb, NULL);
+    if (AAudioStreamBuilder_openStream(b, &g_st) != AAUDIO_OK) { AAudioStreamBuilder_delete(b); g_st = NULL; return -1; }
+    AAudioStreamBuilder_delete(b);
+    klog("audio: AAudio %d Hz callback, burst %d, game keeps %d frames queued\n", AAudioStream_getSampleRate(g_st),
+         AAudioStream_getFramesPerBurst(g_st), g_target_frames);
+    AAudioStream_requestStart(g_st);
+    return 0;
+}
+
+/* Horizon OS mutes an app's streams while it is not the focused app, and a
+ * stream opened during that time stays muted after focus returns: the
+ * video side asks for a fresh stream whenever the session gains focus */
+void adev_restart(void) { atomic_store(&g_restart, 1); }
+
+int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int nbuf)
+{
+    int32_t chunk_frames;
+    if (bits != 16) return -1;
+    g_freq = freq;
     g_chunk = chunk_bytes;
     g_ch = channels;
     g_frame_bytes = (uint32_t)(channels * bits / 8);
@@ -138,17 +167,18 @@ int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int n
     if (getenv("JPRT_AUDIO_MS")) g_target_frames = (int32_t)((int64_t)freq * atoi(getenv("JPRT_AUDIO_MS")) / 1000);
     if (g_target_frames > RING_FRAMES - chunk_frames) g_target_frames = RING_FRAMES - chunk_frames;
     g_ring = calloc(RING_FRAMES, g_frame_bytes);
-    if (!g_ring || AAudioStreamBuilder_openStream(b, &g_st) != AAUDIO_OK) { AAudioStreamBuilder_delete(b); return -1; }
-    AAudioStreamBuilder_delete(b);
-    klog("audio: AAudio %d Hz callback, burst %d, game keeps %d frames queued\n", AAudioStream_getSampleRate(g_st),
-         AAudioStream_getFramesPerBurst(g_st), g_target_frames);
-    AAudioStream_requestStart(g_st);
-    return 0;
+    if (!g_ring) return -1;
+    atomic_store(&g_restart, 0);
+    return open_stream();
 }
 
 int adev_free_chunks(void)
 {
     static uint64_t last_log;
+    if (atomic_exchange(&g_restart, 0)) {    /* on a game thread (the pump), never in a callback */
+        if (g_st) { AAudioStream_requestStop(g_st); AAudioStream_close(g_st); g_st = NULL; }
+        open_stream();
+    }
     int64_t queued = (int64_t)(atomic_load(&g_wr) - atomic_load(&g_rd));
     int64_t room = (int64_t)g_target_frames - queued;
     uint64_t rd = atomic_load(&g_rd);
@@ -185,4 +215,5 @@ int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int n
 int adev_free_chunks(void) { return 0; }
 void adev_submit(const void *data) { (void)data; }
 void adev_close(void) {}
+void adev_restart(void) {}
 #endif

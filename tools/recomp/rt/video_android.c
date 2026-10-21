@@ -41,6 +41,7 @@
 #include "kernel.h"
 #include "video.h"
 #include "glsl_es.h"
+#include "audiodev.h"
 
 extern int g_gles;
 extern JavaVM *g_android_vm;               /* android_main.c */
@@ -102,8 +103,8 @@ static int xr_init_instance(void)
     if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, 0, &ne, NULL)) && ne &&
         (props = calloc(ne, sizeof *props))) {
         for (i = 0; i < ne; i++) props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
-        if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, ne, &ne, props)))
-            for (i = 0; i < ne; i++)
+        if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, ne, &ne, props))) {
+            for (i = 0; i < ne; i++) {
                 if (!strcmp(props[i].extensionName, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME)) {
                     exts[next++] = XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
                     g_layer_settings = 1;
@@ -111,6 +112,8 @@ static int xr_init_instance(void)
                     exts[next++] = XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
                     g_perf_settings = 1;
                 }
+            }
+        }
         free(props);
     }
     klog("openxr: layer settings (supersample/sharpen) %s\n", g_layer_settings ? "on" : "unavailable");
@@ -522,6 +525,9 @@ static void poll_events(void)
             const XrEventDataSessionStateChanged *sc = (const XrEventDataSessionStateChanged *)&e;
             g_state = sc->state;
             klog("openxr: session state %d\n", (int)g_state);
+            /* Horizon OS mutes the app while unfocused, and a stream opened
+             * (or running) then stays muted: a fresh one on regaining focus */
+            if (g_state == XR_SESSION_STATE_FOCUSED) adev_restart();
             if (g_state == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo bi = { XR_TYPE_SESSION_BEGIN_INFO };
                 bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;

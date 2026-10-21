@@ -8,5 +8,6 @@ int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int n
 int adev_free_chunks(void);            /* chunks that can be submitted now */
 void adev_submit(const void *data);    /* one chunk (chunk_bytes) */
 void adev_close(void);
+void adev_restart(void);              /* reopen the device stream (Android: after a focus change) */
 
 #endif
