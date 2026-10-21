@@ -6,7 +6,7 @@
 #
 #   sh tools/quest/push_data.sh ["<game dir>"]
 # Install and start the APK once first (it creates its data directory).
-set -eu
+set -u
 export MSYS_NO_PATHCONV=1           # Git Bash: keep /sdcard/... paths as they are
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -37,14 +37,34 @@ for f in "$L"/ld-2.19.so "$L"/libc-2.19.so "$L"/libm-2.19.so "$L"/libpthread-2.1
     cp "$f" "$STAGE/"
 done
 
-"$ADB" shell mkdir -p "$DEST/game" "$DEST/libs"
-echo "pushing libraries..."
-"$ADB" push "$(winpath "$STAGE")/." "$DEST/libs/"
-echo "pushing the game (about 5 GB; takes a while)..."
-for e in "$GAME"/*; do
-    case "$(basename "$e")" in game_original|*.q0bak) continue ;; esac
-    "$ADB" push "$(winpath "$e")" "$DEST/game/"
-done
+direct_push() {
+    "$ADB" shell mkdir -p "$DEST/game" "$DEST/libs" || return 1
+    echo "pushing libraries..."
+    "$ADB" push "$(winpath "$STAGE")/." "$DEST/libs/" || return 1
+    echo "pushing the game (about 5 GB; takes a while)..."
+    for e in "$GAME"/*; do
+        case "$(basename "$e")" in game_original|*.q0bak|TeknoParrot|teknoparrot.ini) continue ;; esac
+        "$ADB" push "$(winpath "$e")" "$DEST/game/" || return 1
+    done
+}
+
+# Some Android builds do not let adb create directories inside the app's
+# storage: then one data.tar goes in, and the app unpacks it on start.
+tar_push() {
+    TAR="$ROOT/ext/quest_data.tar"
+    echo "direct push failed: packing $TAR (game + libs) for the app to unpack..."
+    rm -f "$TAR"
+    # from inside each dir with a fixed prefix (the game dir's own name has
+    # [] which --transform would read as a regex bracket)
+    (cd "$GAME" && tar --format=ustar -cf "$TAR" \
+        --exclude=game_original --exclude='*.q0bak' --exclude=TeknoParrot --exclude=teknoparrot.ini \
+        --transform 's,^,game/,' -- *)
+    (cd "$STAGE" && tar --format=ustar -rf "$TAR" --transform 's,^,libs/,' -- *)
+    "$ADB" push "$(winpath "$TAR")" "$DEST/data.tar"
+    echo "pushed data.tar: the next app start unpacks it (a few minutes) and deletes it"
+}
+
+if [ "${MODE:-direct}" = tar ] || ! direct_push; then tar_push; fi
 echo "done. Start the app from the headset (Library > Unknown sources) or:"
 echo "  $ADB shell am start -n $PKG/android.app.NativeActivity"
 echo "log: $ADB logcat -s jprt  (also $DEST/jprt.log)"

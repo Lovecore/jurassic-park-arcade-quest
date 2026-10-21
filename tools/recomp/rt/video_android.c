@@ -553,8 +553,29 @@ void vid_present(void)
             /* raw texel copy: OpenXR GL swapchains are bottom-up like the
              * game's framebuffer, and the game's pixels are already
              * display-encoded, which an sRGB swapchain expects verbatim */
-            glCopyImageSubData(g_color, GL_TEXTURE_2D, 0, 0, 0, 0,
-                               g_sc_img[idx].image, GL_TEXTURE_2D, 0, 0, 0, 0, g_w, g_h, 1);
+            if (glsl_es_version >= 320) {
+                glCopyImageSubData(g_color, GL_TEXTURE_2D, 0, 0, 0, 0,
+                                   g_sc_img[idx].image, GL_TEXTURE_2D, 0, 0, 0, 0, g_w, g_h, 1);
+            } else {                        /* ES 3.0/3.1 (emulators): a blit (sRGB-encodes) */
+                static GLuint dst_fbo;
+                GLint prev_draw = 0, prev_read = 0;
+                glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw);
+                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+                if (!dst_fbo) glGenFramebuffers(1, &dst_fbo);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
+                glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                       g_sc_img[idx].image, 0);
+                glBlitFramebuffer(0, 0, g_w, g_h, 0, 0, g_w, g_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev_draw);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read);
+            }
+            {
+                static int checked;
+                GLenum e = glGetError();
+                if (e && checked++ < 3) klog("openxr: frame copy GL error %#x\n", e);
+            }
             xrReleaseSwapchainImage(g_sc, &ri);
             quad.space = g_local;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;

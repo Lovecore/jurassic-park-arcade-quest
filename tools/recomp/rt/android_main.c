@@ -49,10 +49,46 @@ static void load_env_file(const char *dir)
     fclose(f);
 }
 
+/* <ext>/data.tar (push_data.sh's fallback where adb cannot create
+ * directories inside the app's storage): unpacked here, then deleted.
+ * Plain ustar: regular files and directories. */
+static void unpack_data_tar(const char *dir)
+{
+    char path[1100], hdr[512], name[700], out[1900];
+    FILE *t, *o;
+    long n = 0;
+    snprintf(path, sizeof(path), "%s/data.tar", dir);
+    if (!(t = fopen(path, "rb"))) return;
+    __android_log_print(ANDROID_LOG_INFO, "jprt", "unpacking %s", path);
+    while (fread(hdr, 1, 512, t) == 512 && hdr[0]) {
+        unsigned long size = strtoul(hdr + 124, NULL, 8), left;
+        char type = hdr[156], *s;
+        snprintf(name, sizeof(name), "%.155s%s%.100s", hdr + 345, hdr[345] ? "/" : "", hdr);
+        snprintf(out, sizeof(out), "%s/%s", dir, name);
+        for (s = out + strlen(dir) + 1; *s; s++)       /* parent directories */
+            if (*s == '/') { *s = 0; mkdir(out, 0777); *s = '/'; }
+        if (type == '5') { mkdir(out, 0777); continue; }
+        o = (type == '0' || type == 0) ? fopen(out, "wb") : NULL;
+        for (left = size; left > 0;) {
+            char buf[65536];
+            size_t k = left > sizeof(buf) ? sizeof(buf) : left;
+            if (fread(buf, 1, k, t) != k) break;
+            if (o) fwrite(buf, 1, k, o);
+            left -= k;
+        }
+        if (o) { fclose(o); n++; }
+        if (size % 512) fseek(t, (long)(512 - size % 512), SEEK_CUR);
+    }
+    fclose(t);
+    remove(path);
+    __android_log_print(ANDROID_LOG_INFO, "jprt", "unpacked %ld files", n);
+}
+
 static void *game_thread(void *p)
 {
     char *argv[] = { "jp2015", g_game, NULL };
     (void)p;
+    unpack_data_tar(getenv("JPRT_DATA_DIR"));
     exit(jprt_main(2, argv));
     return NULL;
 }
@@ -101,6 +137,7 @@ void android_main(struct android_app *app)
     mkdir(ext, 0777);
     if (chdir(ext) != 0) __android_log_print(ANDROID_LOG_ERROR, "jprt", "chdir %s failed", ext);
     snprintf(g_game, sizeof(g_game), "%s/game", ext);
+    setenv("JPRT_DATA_DIR", ext, 1);
     snprintf(buf, sizeof(buf), "%s/libs", ext);
     setenv("JPRT_LIBS", buf, 0);
     snprintf(buf, sizeof(buf), "%s/rootfs", in);

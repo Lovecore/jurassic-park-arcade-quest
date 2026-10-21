@@ -135,8 +135,9 @@ static void check_exts(void)
     if (g_exts_checked) return;
     g_exts_checked = 1;
     e = P(X_GetString, "glGetString", pf_str)(0x1F03);
-    g_has_s3tc = e && strstr(e, "GL_EXT_texture_compression_s3tc") != NULL && !getenv("JPRT_DECODE_DXT");
-    g_has_rgtc = e && strstr(e, "GL_EXT_texture_compression_rgtc") != NULL && !getenv("JPRT_DECODE_DXT");
+    /* decoded by default (as on the Quest, which has no S3TC): the game reads textures back */
+    g_has_s3tc = e && strstr(e, "GL_EXT_texture_compression_s3tc") != NULL && getenv("JPRT_NATIVE_DXT");
+    g_has_rgtc = e && strstr(e, "GL_EXT_texture_compression_rgtc") != NULL && getenv("JPRT_NATIVE_DXT");
     klog("gles: S3TC %s, RGTC %s\n", g_has_s3tc ? "native" : "decoded", g_has_rgtc ? "native" : "decoded");
 }
 

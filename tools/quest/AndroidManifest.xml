@@ -31,6 +31,8 @@
         android:allowBackup="false">
 
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|quest2|questpro" />
+        <!-- Android XR (and its emulator): the system OpenXR runtime library -->
+        <uses-native-library android:name="libopenxr.google.so" android:required="false" />
         <meta-data android:name="com.oculus.handtracking.frequency" android:value="LOW" />
 
         <activity
