@@ -14,6 +14,9 @@ VR, played with the Touch controllers, at a steady 72 fps.
 |---|---|
 | ![Gameplay on the Quest 3](ai_docs/quest-recomp/quest3-gameplay-2026-10-21.jpg) | ![Mission select on the Quest 3](ai_docs/quest-recomp/quest3-mission-select-2026-10-21.jpg) |
 
+**▶ Watch it running:** [gameplay recorded on the Quest 3](docs/media/quest3-gameplay-2026-10-21.mp4)
+(1080p, captured by the headset's own recorder).
+
 > This repo contains **no game files**. You need your own copy of the game;
 > the tools read it from a local folder and nothing from it is committed.
 > Note that the APK you build *does* contain the game's code (recompiled),
@@ -92,10 +95,15 @@ You need: a Quest 3 in developer mode, a USB cable, a Windows PC, and your
 own copy of the game (the Raw Thrills Linux PC build, v1.08).
 
 ```sh
-sh tools/recomp/build_process.sh   # lift the game + libraries to C (once)
-sh tools/quest/build_apk.sh        # build tools/quest/out/jp2015vr.apk
-sh tools/quest/install.sh          # install the app; copy the game data the first time
+sh tools/setup/fetch_deps.sh                          # free dependencies, hash-checked
+sh tools/setup/prepare_game.sh "<your game folder>"   # checks your copy, makes the patched working copy
+sh tools/build_all.sh                                 # discover, lift to C, build the APK
+sh tools/quest/install.sh                             # install; copy the game data the first time
 ```
+
+**Full guide: [Build it yourself](docs/BUILD-IT-YOURSELF.md)** (what you
+need, every step, troubleshooting). Using an AI coding agent? Point it at
+[`AGENTS.md`](AGENTS.md).
 
 Then on the headset: **Library > Unknown sources > Jurassic Park Arcade.**
 
@@ -107,7 +115,7 @@ Then on the headset: **Library > Unknown sources > Jurassic Park Arcade.**
 | Right thumbstick up / down | Bigger / smaller screen (remembered) |
 | Left thumbstick click | Recentre the screen |
 
-Build prerequisites and every switch are in
+Settings and runtime switches are in
 [`tools/quest/README.md`](tools/quest/README.md). The same code also builds
 a Windows executable for development (`tools/recomp/run.sh`).
 
@@ -128,7 +136,10 @@ an on-rails shooter's constant camera motion is uncomfortable in VR). See
 
 | Path | What |
 |---|---|
-| `tools/recomp/` | The recompiler (`discover.py`, `lift.py`, `gen_gl.py`) and the runtime (`rt/`) |
+| `docs/` | [Build it yourself](docs/BUILD-IT-YOURSELF.md), the gameplay video |
+| `AGENTS.md` | The build procedure for AI coding agents |
+| `tools/setup/`, `tools/build_all.sh` | Dependency download, game check and preparation, one-command build |
+| `tools/recomp/` | The recompiler (`discover.py`, `lift.py`, `gen_gl.py`), the game's function map (`symbols_original.txt`) and the runtime (`rt/`) |
 | `tools/recomp/rt/` | Kernel and syscalls, GL/GLES and GLSL translation, audio, platform and video layers, Android entry point |
 | `tools/quest/` | APK build, install and data scripts, manifest, icon |
 | `ai_docs/` | Running engineering logs and screenshots for each phase |

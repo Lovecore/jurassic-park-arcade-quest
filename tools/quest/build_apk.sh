@@ -79,4 +79,4 @@ fi
 PATH="$JAVA_HOME/bin:$PATH" "$BT/apksigner.bat" sign --ks "$(cygpath -w "$KS")" --ks-pass pass:android \
     --out "$(cygpath -w "$O/jp2015vr.apk")" "$(cygpath -w "$O/aligned.apk")"
 ls -la "$O/jp2015vr.apk"
-echo "install: adb install -r $O/jp2015vr.apk ; data: tools/quest/push_data.sh"
+echo "install: sh tools/quest/install.sh (or adb install -r $O/jp2015vr.apk)"

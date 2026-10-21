@@ -9,7 +9,9 @@ PY="$ROOT/.venv/Scripts/python"
 D=${DEBS:-$ROOT/ext/debs}
 L=$D/x_libc6_2.19-0ubuntu6.6_i386/lib/i386-linux-gnu
 TP=${TPLIBS:-$ROOT/ext/TeknoParrot/ElfLdr2/libs}    # PhysX 2.8 i386 runtime (ships with TeknoParrot)
-export JP2015_GAME=${JP2015_GAME:-$ROOT/jp2015-analysis-items/jp2015-analysis}
+# the patched game + symbols (tools/setup/prepare_game.sh), else the analysis bundle
+[ -f "$ROOT/ext/game_work/game" ] && _JG="$ROOT/ext/game_work" || _JG="$ROOT/jp2015-analysis-items/jp2015-analysis"
+export JP2015_GAME=${JP2015_GAME:-$_JG}
 "$PY" "$HERE/discover.py" | sed -n 2p
 while read -r so base; do
     printf '%-22s ' "$(basename "$so")"

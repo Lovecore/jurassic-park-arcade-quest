@@ -10,7 +10,9 @@ set -u
 export MSYS_NO_PATHCONV=1           # Git Bash: keep /sdcard/... paths as they are
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-GAME=${1:-"$ROOT/Jurassic Park (1.08)(2015)[Raw Thrills Linux PC][TP]"}
+# your game folder: the argument, else the one prepare_game.sh recorded
+[ -f "$ROOT/ext/game_dir.txt" ] && _GD=$(cat "$ROOT/ext/game_dir.txt") || _GD="$ROOT/Jurassic Park (1.08)(2015)[Raw Thrills Linux PC][TP]"
+GAME=${1:-$_GD}
 PKG=com.jp2015.vr
 DEST=/sdcard/Android/data/$PKG/files
 ADB=${ADB:-adb}

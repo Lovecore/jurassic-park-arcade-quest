@@ -7,6 +7,8 @@
 game.preundef.bak
 game_original
 symbols_original.txt
+# the function map the recompiler needs, published deliberately (2026-10-21)
+!/tools/recomp/symbols_original.txt
 vr/kit/test/overlay/
 vr/ghidra/game.snapshot
 vr/ghidra/decomp/

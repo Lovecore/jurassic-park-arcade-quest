@@ -49,8 +49,14 @@ else:
         t, off, va, pa, fs, ms, fl, al = struct.unpack_from("<8I", data, e_phoff + i * e_phentsize)
         if t == 1:
             segs.append((va, off, fs, ms, fl))
+    # symbols_original.txt: function names and sizes (the JP2015_GAME dir's
+    # copy, else the one in this repo). Without any, the unwind tables
+    # (.eh_frame) give the functions (about 5% fewer are found).
     syms = []
-    for line in open(os.path.join(BASE, "symbols_original.txt")):
+    _symf = os.path.join(BASE, "symbols_original.txt")
+    if not os.path.exists(_symf):
+        _symf = os.path.join(HERE, "symbols_original.txt")
+    for line in (open(_symf) if os.path.exists(_symf) else []):
         p = line.split(None, 2)
         if len(p) == 3:
             try:
@@ -58,7 +64,13 @@ else:
             except ValueError:
                 pass
     CODE_LO = next(s[0] for s in segs if s[4] & 1)
-    CODE_HI = next(a for a, s, n in syms if n == "_IO_stdin_used")   # .rodata starts here
+    _ex = next(s for s in segs if s[4] & 1)
+    # .rodata starts at _IO_stdin_used; without symbols, provisionally the
+    # end of the executable segment (narrowed to .text after the FDEs below)
+    CODE_HI = next((a for a, s, n in syms if n == "_IO_stdin_used"), _ex[0] + _ex[2])
+    NOSYMS = not syms
+    if NOSYMS:
+        print("discover: no symbols_original.txt: functions from .eh_frame, calls and data", file=sys.stderr)
 
 def v2o(v):
     for va, off, fs, ms, fl in segs:
@@ -136,11 +148,15 @@ if MOD:
         _ex = next(s for s in segs if s[4] & 1)
         CODE_HI = max(CODE_HI, min(ARGS.base + MOD.dyn[13] + 0x40, _ex[0] + _ex[2]))
 else:
-    CODE_LO = min(min(FDES), min(named))
+    CODE_LO = min(list(FDES) + list(named))
     import elfmod as _em0
     _gd = _em0.Mod(os.path.join(BASE, "game"), 0, "game").dyn
     if 12 in _gd:                             # _init (.init) precedes .plt/.text
         CODE_LO = min(CODE_LO, _gd[12])
+    if NOSYMS:                                # .text ends with the last function (or .fini)
+        CODE_HI = max(f["end"] for f in FDES.values())
+        if 13 in _gd:
+            CODE_HI = max(CODE_HI, min(_gd[13] + 0x40, _ex[0] + _ex[2]))
 FDES = {a: f for a, f in FDES.items() if in_code(a)}
 
 md = Cs(CS_ARCH_X86, CS_MODE_32)
@@ -452,7 +468,7 @@ while work:
 PROLOGUES = (bytes((0x55, 0x89, 0xe5)), bytes((0x55, 0x57, 0x56, 0x53)),
              bytes((0x57, 0x56, 0x53)), bytes((0x56, 0x53, 0x83, 0xec)),
              bytes((0x53, 0x83, 0xec)), bytes((0x83, 0xec)), bytes((0x55, 0x57, 0x56)))
-CODE_START = (min(list(FDES) + list(named)) if MOD else
+CODE_START = (min(list(FDES) + list(named)) if MOD or "main" not in named.values() else
               min(a for a in named if named[a] == "main"))    # header/.plt below this
 for _round in range(4):
     covered = sorted((b, e) for f in funcs.values() for b, e in f.blocks.items())
