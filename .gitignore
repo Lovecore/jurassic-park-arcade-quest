@@ -48,3 +48,4 @@ vr/ghidra/*.log
 vr/win/out/
 tools/recomp/out/
 /tools/quest/out/
+/tools/quest/out-*/

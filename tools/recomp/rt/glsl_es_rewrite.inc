@@ -203,8 +203,9 @@ static int out_loc(const glsl_es_binds *b, const char *name, int len)
     return -1;
 }
 
+int glsl_es_version = 320;                /* the context's GLSL ES version (gles.c / video) */
+
 static const char ES_HEADER[] =
-    "#version 320 es\n"
     "precision highp float; precision highp int;\n"
     "precision highp sampler2D; precision highp sampler2DShadow;\n"
     "precision highp samplerCube; precision highp sampler3D;\n"
@@ -233,6 +234,9 @@ char *glsl_es_translate(const char *src, int frag, const glsl_es_binds *binds)
             const char *d = k->s + strspn(k->s, " \t#");
             if (!strncmp(d, "version", 7)) {
                 int s;
+                char v[32];
+                snprintf(v, sizeof(v), "#version %d es%c", glsl_es_version, 10);
+                sb_puts(&out, v);
                 sb_puts(&out, ES_HEADER);
                 if (frag) {
                     for (s = 0; s < 8; s++)

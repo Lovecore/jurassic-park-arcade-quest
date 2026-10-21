@@ -9,7 +9,10 @@ typedef struct {
     int loc[8];
 } glsl_es_binds;
 
-/* returns a malloc'ed ES 3.20 source; binds may be NULL */
+/* GLSL ES version emitted (320 default; 310/300 on lesser contexts) */
+extern int glsl_es_version;
+
+/* returns a malloc'ed ES 3.x source; binds may be NULL */
 char *glsl_es_translate(const char *src, int frag, const glsl_es_binds *binds);
 
 #endif

@@ -120,7 +120,7 @@ enum {
     X_BindBuffer, X_GenBuffers, X_BufferData, X_GenFramebuffers, X_BindFramebuffer,
     X_FramebufferTexture2D, X_ReadPixels, X_GetActiveUniform, X_DrawBuffers, X_ClearDepthf,
     X_DepthRangef, X_GetString, X_MapBufferRange, X_UnmapBuffer, X_Enable, X_Disable, X_Hint,
-    X_ReadBuffer, X_DrawArrays, X_TexParameteriv, X_PixelStorei, X_CheckFramebufferStatus, X_IsTexture, X_BindTexture, X_GetError
+    X_ReadBuffer, X_DrawArrays, X_TexParameteriv, X_PixelStorei, X_CheckFramebufferStatus, X_IsTexture, X_BindTexture, X_GetError, X_DrawElements
 };
 
 #define MAXOBJ 16384
@@ -272,8 +272,27 @@ static void draw_quads(int32_t first, int32_t count)
         free(ix);
         g_quad_cap = cap;
     }
-    P(X_DrawElementsBaseVertex, "glDrawElementsBaseVertex", pf_drawel)(4 /* TRIANGLES */, (int32_t)(6 * nq),
-                                                                       0x1405, NULL, first);
+    if (glsl_es_version >= 320)
+        P(X_DrawElementsBaseVertex, "glDrawElementsBaseVertex", pf_drawel)(4 /* TRIANGLES */, (int32_t)(6 * nq),
+                                                                           0x1405, NULL, first);
+    else if (first == 0)
+        ((void (GLAPI_CALL *)(uint32_t, int32_t, uint32_t, const void *))gl_proc(X_DrawElements, "glDrawElements"))
+            (4, (int32_t)(6 * nq), 0x1405, NULL);
+    else {                                        /* ES 3.0/3.1: offset indices in a scratch buffer */
+        static uint32_t ibo2;
+        uint32_t q, *ix = malloc(sizeof(uint32_t) * 6 * nq);
+        for (q = 0; q < nq; q++) {
+            uint32_t b = (uint32_t)first + 4 * q;
+            ix[6 * q] = b; ix[6 * q + 1] = b + 1; ix[6 * q + 2] = b + 2;
+            ix[6 * q + 3] = b; ix[6 * q + 4] = b + 2; ix[6 * q + 5] = b + 3;
+        }
+        if (!ibo2) P(X_GenBuffers, "glGenBuffers", pf_gen)(1, &ibo2);
+        P(X_BindBuffer, "glBindBuffer", pf_v2)(0x8893, ibo2);
+        P(X_BufferData, "glBufferData", pf_bufdata)(0x8893, (intptr_t)(sizeof(uint32_t) * 6 * nq), ix, 0x88E0);
+        ((void (GLAPI_CALL *)(uint32_t, int32_t, uint32_t, const void *))gl_proc(X_DrawElements, "glDrawElements"))
+            (4, (int32_t)(6 * nq), 0x1405, NULL);
+        free(ix);
+    }
     P(X_BindBuffer, "glBindBuffer", pf_v2)(0x8893, prev);
 }
 

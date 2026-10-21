@@ -7,12 +7,15 @@
 #   sh tools/quest/push_data.sh ["<game dir>"]
 # Install and start the APK once first (it creates its data directory).
 set -eu
+export MSYS_NO_PATHCONV=1           # Git Bash: keep /sdcard/... paths as they are
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 GAME=${1:-"$ROOT/Jurassic Park (1.08)(2015)[Raw Thrills Linux PC][TP]"}
 PKG=com.jp2015.vr
 DEST=/sdcard/Android/data/$PKG/files
 ADB=${ADB:-adb}
+# local paths for adb.exe (a Windows program) when run from Git Bash
+winpath() { if command -v cygpath > /dev/null; then cygpath -m "$1"; else printf "%s" "$1"; fi; }
 D="$ROOT/ext/debs"
 TP="$ROOT/ext/TeknoParrot/ElfLdr2/libs"
 L=$D/x_libc6_2.19-0ubuntu6.6_i386/lib/i386-linux-gnu
@@ -36,11 +39,11 @@ done
 
 "$ADB" shell mkdir -p "$DEST/game" "$DEST/libs"
 echo "pushing libraries..."
-"$ADB" push "$STAGE/." "$DEST/libs/"
+"$ADB" push "$(winpath "$STAGE")/." "$DEST/libs/"
 echo "pushing the game (about 5 GB; takes a while)..."
 for e in "$GAME"/*; do
     case "$(basename "$e")" in game_original|*.q0bak) continue ;; esac
-    "$ADB" push "$e" "$DEST/game/"
+    "$ADB" push "$(winpath "$e")" "$DEST/game/"
 done
 echo "done. Start the app from the headset (Library > Unknown sources) or:"
 echo "  $ADB shell am start -n $PKG/android.app.NativeActivity"

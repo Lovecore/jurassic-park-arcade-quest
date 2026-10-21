@@ -40,6 +40,7 @@
 #include "rt.h"
 #include "kernel.h"
 #include "video.h"
+#include "glsl_es.h"
 
 extern int g_gles;
 extern JavaVM *g_android_vm;               /* android_main.c */
@@ -106,7 +107,7 @@ static int xr_init_instance(void)
 
 static int egl_init(void)
 {
-    const EGLint cfg_attr[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+    const EGLint cfg_attr[] = { EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, g_flat ? 0 : 8,
                                 EGL_DEPTH_SIZE, 0, EGL_RENDERABLE_TYPE, 0x40 /* EGL_OPENGL_ES3_BIT */,
                                 EGL_SURFACE_TYPE, g_flat ? EGL_WINDOW_BIT : EGL_PBUFFER_BIT, EGL_NONE };
     const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 3, 0x30FB /* MINOR */, 2, EGL_NONE };
@@ -114,9 +115,20 @@ static int egl_init(void)
     EGLint n = 0;
     g_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (!eglInitialize(g_dpy, NULL, NULL)) return -1;
-    if (!eglChooseConfig(g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1) return -1;
-    g_ctx = eglCreateContext(g_dpy, g_cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (g_ctx == EGL_NO_CONTEXT) return -1;
+    if (!eglChooseConfig(g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1) { klog("egl: no config\n"); return -1; }
+    {   /* ES 3.2 (the Quest); 3.1 / 3.0 on lesser GPUs such as the emulator's */
+        EGLint attr[5];
+        int minor;
+        memcpy(attr, ctx_attr, sizeof(attr));
+        for (minor = 2; minor >= 0; minor--) {
+            attr[3] = minor;
+            g_ctx = eglCreateContext(g_dpy, g_cfg, EGL_NO_CONTEXT, attr);
+            if (g_ctx != EGL_NO_CONTEXT) break;
+        }
+        if (g_ctx == EGL_NO_CONTEXT) { klog("egl: eglCreateContext failed\n"); return -1; }
+        glsl_es_version = 300 + 10 * minor;
+        if (minor < 2) klog("egl: OpenGL ES 3.%d context (3.2 unavailable)\n", minor);
+    }
     if (g_flat) {
         int i;
         for (i = 0; i < 1000 && !g_android_window; i++) {      /* up to 10 s for the window */
@@ -124,8 +136,13 @@ static int egl_init(void)
             nanosleep(&ts, NULL);
         }
         if (!g_android_window) return -1;
+        {
+            EGLint vid = 0;
+            eglGetConfigAttrib(g_dpy, g_cfg, EGL_NATIVE_VISUAL_ID, &vid);
+            ANativeWindow_setBuffersGeometry(g_android_window, 0, 0, vid);
+        }
         g_win = eglCreateWindowSurface(g_dpy, g_cfg, g_android_window, NULL);
-        if (g_win == EGL_NO_SURFACE) return -1;
+        if (g_win == EGL_NO_SURFACE) { klog("egl: eglCreateWindowSurface failed (%#x)\n", eglGetError()); return -1; }
         return eglMakeCurrent(g_dpy, g_win, g_win, g_ctx) ? 0 : -1;
     }
     g_pbuf = eglCreatePbufferSurface(g_dpy, g_cfg, pb_attr);

@@ -54,9 +54,9 @@ done
 "$CC" $CFLAGS -w -c "$NDK/sources/android/native_app_glue/android_native_app_glue.c" -o "$OBJ/native_app_glue.o"
 
 echo "linking libjp2015.so..."
-cp "$XR/jni/arm64-v8a/libopenxr_loader.so" "$O/apk/lib/arm64-v8a/"
-"$CC" $TARGET -shared -o "$O/apk/lib/arm64-v8a/libjp2015.so" "$OBJ"/*.o \
-    -L"$O/apk/lib/arm64-v8a" -lopenxr_loader -llog -landroid -lEGL -lGLESv3 -laaudio -lm -ldl \
+cp "$XR/jni/$ABI/libopenxr_loader.so" "$LIBDIR/"
+"$CC" $TARGET -shared -o "$LIBDIR/libjp2015.so" "$OBJ"/*.o \
+    -L"$LIBDIR" -lopenxr_loader -llog -landroid -lEGL -lGLESv3 -laaudio -lm -ldl \
     -Wl,--gc-sections -Wl,-z,max-page-size=16384 -Wl,--no-undefined -u ANativeActivity_onCreate
 
 echo "packaging..."
