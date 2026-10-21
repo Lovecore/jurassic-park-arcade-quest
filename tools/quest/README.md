@@ -11,9 +11,10 @@ contains no game files: you push your own copy of the game to the headset.
 - Rendering is OpenGL ES 3.2 through `rt/gles.c`:
   - shaders are translated to GLSL ES by `rt/glsl_es.c`;
   - S3TC and LATC textures are software-decoded by `rt/texdecode.c`.
-- The game renders into an offscreen target, which appears as a 3.2 m wide
+- The game renders into an offscreen target, which appears as a 2.4 m wide
   screen 2.4 m in front of you (an OpenXR quad layer, in
-  `rt/video_android.c`).
+  `rt/video_android.c`). The layer is mipmapped and uses the Quest
+  compositor's supersampling and sharpening (`XR_FB_composition_layer_settings`).
 - Audio is the game's own SDL_mixer, played through AAudio.
 
 ### Controls (Touch controllers)
@@ -28,6 +29,7 @@ contains no game files: you push your own copy of the game to the headset.
 | Y | `w` (game input) |
 | Left trigger | Mouse button 3 (game input 0x157) |
 | Left thumbstick click | Recentre the screen |
+| Right thumbstick up / down | Screen bigger / smaller |
 
 The game is set to free play, so no coins are needed.
 
@@ -69,6 +71,7 @@ line:
 - `JPRT_AUDIO=0`: turn audio off.
 - `JPRT_NATIVE_DXT=1`: upload S3TC textures natively where the GPU supports them (the default decodes them in software, as the Quest needs anyway).
 - `JPRT_SHOT_EVERY=N`: save a frame every N frames.
+- `JPRT_SCREEN_W=2.4`: starting screen width in metres (1.2 to 4.8).
 
 ## Status (2026-10-20)
 
@@ -86,9 +89,13 @@ Verified:
   - The game shows as the screen quad in the composited headset view
     (`ai_docs/quest-recomp/android-xr-emulator-openxr-2026-10-20.png`).
 
-Not yet verified (needs the headset):
-- Quest runtime specifics: Touch controller bindings, the
-  `glCopyImageSubData` frame copy on ES 3.2, frame rate on the XR2 Gen 2.
+- **Quest 3 (2026-10-21):** boots, the OpenXR session reaches FOCUSED,
+  audio plays, and the game shows on the screen quad in both eyes
+  (Adreno 740, OpenGL ES 3.2). The `glCopyImageSubData` frame copy works.
+  The game runs at about 45-50 fps, with guest threads pinned to one core.
+
+Not yet verified:
+- Touch controller bindings in gameplay.
 - arm64 memory ordering with `JPRT_CORES=all`. The default, one core for
   guest threads, is the safe setting.
 

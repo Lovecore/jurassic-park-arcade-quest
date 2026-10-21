@@ -68,11 +68,15 @@ static uint32_t g_sc_n;
 static int g_running;
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static XrPosef g_screen;                      /* screen quad pose in LOCAL space */
-static float g_screen_w = 3.2f, g_screen_h;   /* metres */
+/* metres; 2.4 m wide at 2.4 m is ~53 deg, about one game pixel per display
+ * pixel on the Quest 3 (wider magnifies it and looks soft) */
+static float g_screen_w = 2.4f, g_screen_h;
+static int g_layer_settings;                  /* XR_FB_composition_layer_settings */
+static uint32_t g_sc_mips = 1;
 
 /* input */
 static XrActionSet g_aset = XR_NULL_HANDLE;
-static XrAction g_a_aim, g_a_trigger, g_a_btn[5];
+static XrAction g_a_aim, g_a_trigger, g_a_btn[5], g_a_size;
 static XrPath g_hand[2];
 static XrSpace g_aim_space[2];
 
@@ -85,11 +89,27 @@ static int xr_init_instance(void)
     XrInstanceCreateInfoAndroidKHR ia = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
     XrInstanceCreateInfo ci = { XR_TYPE_INSTANCE_CREATE_INFO };
     XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO };
-    const char *exts[] = { XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
+    const char *exts[3] = { XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
+    uint32_t next = 2, ne = 0, i;
+    XrExtensionProperties *props;
     XRCHK(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR", (PFN_xrVoidFunction *)&init));
     li.applicationVM = g_android_vm;
     li.applicationContext = g_android_activity;
     XRCHK(init((const XrLoaderInitInfoBaseHeaderKHR *)&li));
+    /* optional: the Quest compositor's supersampling / sharpening of layers
+     * (a 1360x768 flat screen is soft without it) */
+    if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, 0, &ne, NULL)) && ne &&
+        (props = calloc(ne, sizeof *props))) {
+        for (i = 0; i < ne; i++) props[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+        if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(NULL, ne, &ne, props)))
+            for (i = 0; i < ne; i++)
+                if (!strcmp(props[i].extensionName, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME)) {
+                    exts[next++] = XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
+                    g_layer_settings = 1;
+                }
+        free(props);
+    }
+    klog("openxr: layer settings (supersample/sharpen) %s\n", g_layer_settings ? "on" : "unavailable");
     ia.applicationVM = g_android_vm;
     ia.applicationActivity = g_android_activity;
     ci.next = &ia;
@@ -97,7 +117,7 @@ static int xr_init_instance(void)
     ci.applicationInfo.applicationVersion = 1;
     snprintf(ci.applicationInfo.engineName, sizeof(ci.applicationInfo.engineName), "jprt");
     ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 34);
-    ci.enabledExtensionCount = 2;
+    ci.enabledExtensionCount = next;
     ci.enabledExtensionNames = exts;
     XRCHK(xrCreateInstance(&ci, &g_inst));
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -175,7 +195,7 @@ static int xr_init_input(void)
     static const char *const btn_paths[5] = { "/user/hand/right/input/a/click", "/user/hand/right/input/b/click",
                                               "/user/hand/left/input/x/click", "/user/hand/left/input/y/click",
                                               "/user/hand/left/input/thumbstick/click" };
-    XrActionSuggestedBinding b[10];
+    XrActionSuggestedBinding b[11];
     XrInteractionProfileSuggestedBinding sb = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
     XrSessionActionSetsAttachInfo at = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
     int i, n = 0;
@@ -188,11 +208,13 @@ static int xr_init_input(void)
     if (xr_make_action(XR_ACTION_TYPE_FLOAT_INPUT, "trigger", 1, &g_a_trigger) < 0) return -1;
     for (i = 0; i < 5; i++)
         if (xr_make_action(XR_ACTION_TYPE_BOOLEAN_INPUT, btn_names[i], 0, &g_a_btn[i]) < 0) return -1;
+    if (xr_make_action(XR_ACTION_TYPE_FLOAT_INPUT, "screen_size", 0, &g_a_size) < 0) return -1;
     b[n].action = g_a_aim; b[n++].binding = path("/user/hand/left/input/aim/pose");
     b[n].action = g_a_aim; b[n++].binding = path("/user/hand/right/input/aim/pose");
     b[n].action = g_a_trigger; b[n++].binding = path("/user/hand/left/input/trigger/value");
     b[n].action = g_a_trigger; b[n++].binding = path("/user/hand/right/input/trigger/value");
     for (i = 0; i < 5; i++) { b[n].action = g_a_btn[i]; b[n++].binding = path(btn_paths[i]); }
+    b[n].action = g_a_size; b[n++].binding = path("/user/hand/right/input/thumbstick/y");
     sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
     sb.countSuggestedBindings = (uint32_t)n;
     sb.suggestedBindings = b;
@@ -233,7 +255,7 @@ static int xr_init_session(void)
     XrSessionCreateInfo sci = { XR_TYPE_SESSION_CREATE_INFO };
     XrReferenceSpaceCreateInfo rs = { XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
     XrSwapchainCreateInfo swi = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-    int64_t fmts[64];
+    int64_t *fmts;
     uint32_t nf = 0, i;
     int64_t fmt = 0;
     XRCHK(xrGetInstanceProcAddr(g_inst, "xrGetOpenGLESGraphicsRequirementsKHR", (PFN_xrVoidFunction *)&req_fn));
@@ -249,9 +271,13 @@ static int xr_init_session(void)
     XRCHK(xrCreateReferenceSpace(g_sess, &rs, &g_local));
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     XRCHK(xrCreateReferenceSpace(g_sess, &rs, &g_view));
-    XRCHK(xrEnumerateSwapchainFormats(g_sess, 64, &nf, fmts));
+    /* two-call idiom: the Quest runtime lists well over 64 formats */
+    XRCHK(xrEnumerateSwapchainFormats(g_sess, 0, &nf, NULL));
+    fmts = calloc(nf ? nf : 1, sizeof *fmts);
+    XRCHK(xrEnumerateSwapchainFormats(g_sess, nf, &nf, fmts));
     for (i = 0; i < nf; i++) if (fmts[i] == GL_SRGB8_ALPHA8) fmt = fmts[i];
     if (!fmt) for (i = 0; i < nf; i++) if (fmts[i] == GL_RGBA8) fmt = fmts[i];
+    free(fmts);
     if (!fmt) { klog("openxr: no RGBA8 swapchain format\n"); return -1; }
     swi.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     swi.format = fmt;
@@ -260,15 +286,26 @@ static int xr_init_session(void)
     swi.height = (uint32_t)g_h;
     swi.faceCount = 1;
     swi.arraySize = 1;
-    swi.mipCount = 1;
-    XRCHK(xrCreateSwapchain(g_sess, &swi, &g_sc));
+    /* a full mip chain (rebuilt each frame) so the compositor minifies the
+     * screen cleanly when it is small or far; plain level 0 if refused */
+    for (g_sc_mips = 1; (g_w >> g_sc_mips) || (g_h >> g_sc_mips); g_sc_mips++) {}
+    swi.mipCount = g_sc_mips;
+    if (XR_FAILED(xrCreateSwapchain(g_sess, &swi, &g_sc))) {
+        klog("openxr: mipmapped swapchain refused, using one level\n");
+        swi.mipCount = g_sc_mips = 1;
+        XRCHK(xrCreateSwapchain(g_sess, &swi, &g_sc));
+    }
     for (i = 0; i < 8; i++) g_sc_img[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
-    XRCHK(xrEnumerateSwapchainImages(g_sc, 8, &g_sc_n, (XrSwapchainImageBaseHeader *)g_sc_img));
+    XRCHK(xrEnumerateSwapchainImages(g_sc, 0, &g_sc_n, NULL));
+    if (g_sc_n > 8) { klog("openxr: %u swapchain images (max 8)\n", g_sc_n); return -1; }
+    XRCHK(xrEnumerateSwapchainImages(g_sc, g_sc_n, &g_sc_n, (XrSwapchainImageBaseHeader *)g_sc_img));
     /* the cabinet screen: 2.4 m in front at eye height of the start pose */
     g_screen.orientation.w = 1;
     g_screen.position.z = -2.4f;
+    if (getenv("JPRT_SCREEN_W") && atof(getenv("JPRT_SCREEN_W")) > 0.1) g_screen_w = (float)atof(getenv("JPRT_SCREEN_W"));
     g_screen_h = g_screen_w * (float)g_h / (float)g_w;
-    klog("openxr: session up, swapchain %ux%u format %#llx, %u images\n", g_w, g_h, (long long)fmt, g_sc_n);
+    klog("openxr: session up, swapchain %ux%u format %#llx, %u images, %u mips, screen %.2f m\n", g_w, g_h,
+         (long long)fmt, g_sc_n, g_sc_mips, g_screen_w);
     return xr_init_input();
 }
 
@@ -445,6 +482,20 @@ static void poll_input(XrTime t)
         if (i < 4) key(btn_key[i], down);
         else if (down) recenter(t);
     }
+    {   /* right thumbstick up / down: screen bigger / smaller (1.2 .. 4.8 m) */
+        XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO };
+        XrActionStateFloat st = { XR_TYPE_ACTION_STATE_FLOAT };
+        static XrTime last;
+        gi.action = g_a_size;
+        if (XR_SUCCEEDED(xrGetActionStateFloat(g_sess, &gi, &st)) && st.isActive && fabsf(st.currentState) > 0.25f) {
+            float dt = last ? (float)(t - last) * 1e-9f : 0.f;
+            if (dt > 0.1f) dt = 0.1f;
+            g_screen_w *= 1.f + st.currentState * 0.5f * dt;
+            g_screen_w = fminf(fmaxf(g_screen_w, 1.2f), 4.8f);
+            g_screen_h = g_screen_w * (float)g_h / (float)g_w;
+        }
+        last = t;
+    }
 }
 
 /* ---- session state ---- */
@@ -568,6 +619,7 @@ void vid_present(void)
             /* raw texel copy: OpenXR GL swapchains are bottom-up like the
              * game's framebuffer, and the game's pixels are already
              * display-encoded, which an sRGB swapchain expects verbatim */
+            while (glGetError()) {}             /* only the copy's own errors below */
             if (glsl_es_version >= 320) {
                 glCopyImageSubData(g_color, GL_TEXTURE_2D, 0, 0, 0, 0,
                                    g_sc_img[idx].image, GL_TEXTURE_2D, 0, 0, 0, 0, g_w, g_h, 1);
@@ -586,6 +638,13 @@ void vid_present(void)
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev_draw);
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read);
             }
+            if (g_sc_mips > 1) {
+                GLint prev_tex = 0;
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev_tex);
+                glBindTexture(GL_TEXTURE_2D, g_sc_img[idx].image);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, (GLuint)prev_tex);
+            }
             {
                 static int checked;
                 GLenum e = glGetError();
@@ -600,6 +659,12 @@ void vid_present(void)
             quad.pose = g_screen;
             quad.size.width = g_screen_w;
             quad.size.height = g_screen_h;
+            if (g_layer_settings) {
+                static XrCompositionLayerSettingsFB ls = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
+                ls.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+                quad.next = &ls;
+            }
             layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
             ei.layerCount = 1;
             ei.layers = layers;

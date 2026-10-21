@@ -447,7 +447,13 @@ static int sdl(rt_cpu *cpu, const char *n)
         vid_pump();
         audio_pump(cpu);
         scripted_keys(frames);
-        if ((++frames % 600) == 1) klog("frame %u\n", frames);
+        if ((++frames % 600) == 1) {
+            static uint64_t t0;
+            uint64_t t = plat_mono_ns();
+            if (t0) klog("frame %u (%.1f fps)\n", frames, 600e9 / (double)(t - t0));
+            else klog("frame %u\n", frames);
+            t0 = t;
+        }
         RET(0);
     }
     if (!strcmp(n, "SDL_PollEvent")) {
