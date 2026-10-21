@@ -60,8 +60,11 @@ cp "$XR/jni/$ABI/libopenxr_loader.so" "$LIBDIR/"
     -Wl,--gc-sections -Wl,-z,max-page-size=16384 -Wl,--no-undefined -u ANativeActivity_onCreate
 
 echo "packaging..."
+# resources: the launcher icon (tools/quest/res)
+rm -f "$O/res.zip"
+"$BT/aapt2.exe" compile --dir "$(cygpath -w "$HERE/res")" -o "$(cygpath -w "$O/res.zip")" || exit 1
 "$BT/aapt2.exe" link -o "$O/base.apk" --manifest "$HERE/AndroidManifest.xml" -I "$PLATFORM/android.jar" \
-    --min-sdk-version $API --target-sdk-version 32
+    --min-sdk-version $API --target-sdk-version 32 "$O/res.zip" || exit 1
 PY="$ROOT/.venv/Scripts/python"
 [ -x "$PY" ] || PY=python
 "$PY" -I "$HERE/add_libs.py" "$O/base.apk" "$O/apk" "$O/unaligned.apk"

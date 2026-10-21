@@ -11,7 +11,7 @@ contains no game files: you push your own copy of the game to the headset.
 - Rendering is OpenGL ES 3.2 through `rt/gles.c`:
   - shaders are translated to GLSL ES by `rt/glsl_es.c`;
   - S3TC and LATC textures are software-decoded by `rt/texdecode.c`.
-- The game renders into an offscreen target, which appears as a 2.4 m wide
+- The game renders into an offscreen target, which appears as a 4 m wide
   screen 2.4 m in front of you (an OpenXR quad layer, in
   `rt/video_android.c`). The layer is mipmapped and uses the Quest
   compositor's supersampling and sharpening (`XR_FB_composition_layer_settings`).
@@ -29,7 +29,7 @@ contains no game files: you push your own copy of the game to the headset.
 | Y | `w` (game input) |
 | Left trigger | Mouse button 3 (game input 0x157) |
 | Left thumbstick click | Recentre the screen |
-| Right thumbstick up / down | Screen bigger / smaller |
+| Right thumbstick up / down | Screen bigger / smaller (remembered) |
 
 The game is set to free play, so no coins are needed.
 
@@ -51,15 +51,22 @@ sh tools/quest/build_apk.sh          # -> tools/quest/out/jp2015vr.apk
 
 ## Install and run
 
-1. Turn on developer mode on the Quest and connect it over USB, with USB
-   debugging allowed.
-2. Install: `adb install -r tools/quest/out/jp2015vr.apk`
-3. Start the app once from Library > Unknown sources. It quits because it
-   finds no data.
-4. Push the data: `sh tools/quest/push_data.sh`. This copies the game
-   folder (about 5 GB) and the i386 libraries to
-   `/sdcard/Android/data/com.jp2015.vr/files/`.
-5. Start the app again.
+The app is "Jurassic Park Arcade" (com.jp2015.vr), with its own icon, and
+starts from the headset's Library like any other app.
+
+1. On the Quest: developer mode on (Meta Horizon phone app), then connect
+   it over USB, put it on and accept "Allow USB debugging".
+2. On the PC: `sh tools/quest/install.sh`. It installs (or updates) the
+   APK and, only the first time, copies your game folder (about 5 GB) and
+   the i386 libraries to `/sdcard/Android/data/com.jp2015.vr/files/`.
+3. On the headset: Library, filter "Unknown sources", Jurassic Park
+   Arcade. The first start after a copy unpacks the data (a few minutes).
+
+Updating (`install.sh` again, same signing key in `ext/keystore`) keeps the
+copied data. Uninstalling the app deletes it.
+
+The screen is 4 m wide by default; the size set with the right thumbstick
+is saved in `files/screen.txt`.
 
 To see the log, run `adb logcat -s jprt`. The log is also written to
 `files/jprt.log`.

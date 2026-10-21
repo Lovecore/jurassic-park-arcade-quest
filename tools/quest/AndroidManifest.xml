@@ -2,8 +2,8 @@
 <!-- Quest 3 app: NativeActivity (no Java code) running the recompiled game. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.jp2015.vr"
-    android:versionCode="1"
-    android:versionName="0.1"
+    android:versionCode="2"
+    android:versionName="1.0"
     android:installLocation="auto">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="32" />
@@ -25,7 +25,8 @@
     </queries>
 
     <application
-        android:label="Jurassic Park VR (recompiled)"
+        android:label="Jurassic Park Arcade"
+        android:icon="@mipmap/ic_launcher"
         android:hasCode="false"
         android:extractNativeLibs="true"
         android:allowBackup="false">

@@ -69,9 +69,9 @@ static uint32_t g_sc_n;
 static int g_running;
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static XrPosef g_screen;                      /* screen quad pose in LOCAL space */
-/* metres; 2.4 m wide at 2.4 m is ~53 deg, about one game pixel per display
- * pixel on the Quest 3 (wider magnifies it and looks soft) */
-static float g_screen_w = 2.4f, g_screen_h;
+/* metres, at 2.4 m: 4 m is a big cinema-like screen (the player's choice;
+ * 2.4 m would be about one game pixel per display pixel) */
+static float g_screen_w = 4.0f, g_screen_h;
 static int g_layer_settings;                  /* XR_FB_composition_layer_settings */
 static int g_perf_settings;                   /* XR_EXT_performance_settings */
 
@@ -314,6 +314,12 @@ static int xr_init_session(void)
     /* the cabinet screen: 2.4 m in front at eye height of the start pose */
     g_screen.orientation.w = 1;
     g_screen.position.z = -2.4f;
+    {   /* the size last set with the thumbstick (files/screen.txt); JPRT_SCREEN_W overrides */
+        FILE *f = fopen("screen.txt", "r");
+        float w = 0;
+        if (f) { if (fscanf(f, "%f", &w) != 1) w = 0; fclose(f); }
+        if (w >= 1.2f && w <= 6.0f) g_screen_w = w;
+    }
     if (getenv("JPRT_SCREEN_W") && atof(getenv("JPRT_SCREEN_W")) > 0.1) g_screen_w = (float)atof(getenv("JPRT_SCREEN_W"));
     g_screen_h = g_screen_w * (float)g_h / (float)screen_px_w();
     klog("openxr: session up, swapchain %ux%u format %#llx, %u images, %u mips, screen %.2f m\n", g_w, g_h,
@@ -577,17 +583,24 @@ static void poll_input(XrTime t)
         if (i < 4) key(btn_key[i], down);
         else if (down) recenter(t);
     }
-    {   /* right thumbstick up / down: screen bigger / smaller (1.2 .. 4.8 m) */
+    {   /* right thumbstick up / down: screen bigger / smaller (1.2 .. 6 m);
+         * the size is kept in files/screen.txt for the next start */
         XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO };
         XrActionStateFloat st = { XR_TYPE_ACTION_STATE_FLOAT };
         static XrTime last;
+        static int resizing;
         gi.action = g_a_size;
         if (XR_SUCCEEDED(xrGetActionStateFloat(g_sess, &gi, &st)) && st.isActive && fabsf(st.currentState) > 0.25f) {
             float dt = last ? (float)(t - last) * 1e-9f : 0.f;
             if (dt > 0.1f) dt = 0.1f;
             g_screen_w *= 1.f + st.currentState * 0.5f * dt;
-            g_screen_w = fminf(fmaxf(g_screen_w, 1.2f), 4.8f);
+            g_screen_w = fminf(fmaxf(g_screen_w, 1.2f), 6.0f);
             g_screen_h = g_screen_w * (float)g_h / (float)screen_px_w();
+            resizing = 1;
+        } else if (resizing) {                      /* stick released: remember */
+            FILE *f = fopen("screen.txt", "w");
+            if (f) { fprintf(f, "%.3f\n", (double)g_screen_w); fclose(f); }
+            resizing = 0;
         }
         last = t;
     }
