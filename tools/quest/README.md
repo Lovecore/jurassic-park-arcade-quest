@@ -104,6 +104,20 @@ on the XR emulator), `push_data.sh` sends a single `data.tar` instead. The
 app unpacks it on its next start. You can force this with
 `MODE=tar sh tools/quest/push_data.sh`.
 
+Performance (2026-10-21, Quest 3, gameplay): a steady 72 fps; the game
+thread uses about 7 ms of CPU per frame (budget 13.9 ms at 72 Hz). The log
+prints this every 600 frames ("game ... ms avg ... (cpu ...)"). What it took:
+- the game's job worker polled its queue nonstop (a whole core, contending
+  for the lock the main thread needs): JobWorker / JobSubmit / JobFlush are
+  host functions now (`rt/hostgame.c`) that sleep and wake properly;
+- per-call runtime overhead: the thunk-table scan is hashed, find_lifted is
+  cached, GL dispatch skips its string compares;
+- `RT_MEM` has hidden visibility (no GOT load per guest memory access);
+- `XR_EXT_performance_settings`: CPU and GPU at sustained-high.
+To profile: `adb push $NDK/simpleperf/bin/android/arm64/simpleperf
+/data/local/tmp/` then `simpleperf record --app com.jp2015.vr` (the APK is
+profileable).
+
 Next:
 - Stereo 3D: render the game's camera per eye, using the engine's OVR
   mode 2.

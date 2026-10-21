@@ -86,7 +86,13 @@ typedef struct rt_cpu {
     uint32_t mxcsr;
 } rt_cpu;
 
+#if defined(__ELF__)
+/* hidden: one PC-relative load instead of a GOT indirection on every guest
+ * memory access (the Android build is a shared library) */
+extern uint8_t *RT_MEM __attribute__((visibility("hidden")));
+#else
 extern uint8_t *RT_MEM;
+#endif
 
 /* ---- guest memory ---- */
 #define RT_P(a) ((void *)(RT_MEM + (uint32_t)(a)))

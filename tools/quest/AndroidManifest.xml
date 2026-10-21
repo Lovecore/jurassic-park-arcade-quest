@@ -30,6 +30,8 @@
         android:extractNativeLibs="true"
         android:allowBackup="false">
 
+        <!-- lets simpleperf (NDK) profile the release build from adb -->
+        <profileable android:shell="true" />
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|quest2|questpro" />
         <!-- Android XR (and its emulator): the system OpenXR runtime library -->
         <uses-native-library android:name="libopenxr.google.so" android:required="false" />

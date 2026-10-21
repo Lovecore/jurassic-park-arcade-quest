@@ -38,7 +38,7 @@ uint32_t host_thunk_addr(const char *name);
 /* ---- calling guest code from a host function ---- */
 #define GUEST_RA 0xf0000ff0u            /* never executed: the callee returns to us */
 
-static uint32_t guest_call(rt_cpu *cpu, uint32_t fn, int n, const uint32_t *args)
+uint32_t guest_call(rt_cpu *cpu, uint32_t fn, int n, const uint32_t *args)
 {
     uint32_t esp0 = cpu->esp, sp = ((esp0 - 128) & ~15u) - 4u * (uint32_t)n;
     int i;

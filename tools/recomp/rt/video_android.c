@@ -72,6 +72,7 @@ static XrPosef g_screen;                      /* screen quad pose in LOCAL space
  * pixel on the Quest 3 (wider magnifies it and looks soft) */
 static float g_screen_w = 2.4f, g_screen_h;
 static int g_layer_settings;                  /* XR_FB_composition_layer_settings */
+static int g_perf_settings;                   /* XR_EXT_performance_settings */
 static uint32_t g_sc_mips = 1;
 
 /* input */
@@ -89,7 +90,7 @@ static int xr_init_instance(void)
     XrInstanceCreateInfoAndroidKHR ia = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
     XrInstanceCreateInfo ci = { XR_TYPE_INSTANCE_CREATE_INFO };
     XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO };
-    const char *exts[3] = { XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
+    const char *exts[4] = { XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME, XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME };
     uint32_t next = 2, ne = 0, i;
     XrExtensionProperties *props;
     XRCHK(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR", (PFN_xrVoidFunction *)&init));
@@ -106,6 +107,9 @@ static int xr_init_instance(void)
                 if (!strcmp(props[i].extensionName, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME)) {
                     exts[next++] = XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
                     g_layer_settings = 1;
+                } else if (!strcmp(props[i].extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME)) {
+                    exts[next++] = XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+                    g_perf_settings = 1;
                 }
         free(props);
     }
@@ -306,6 +310,14 @@ static int xr_init_session(void)
     g_screen_h = g_screen_w * (float)g_h / (float)g_w;
     klog("openxr: session up, swapchain %ux%u format %#llx, %u images, %u mips, screen %.2f m\n", g_w, g_h,
          (long long)fmt, g_sc_n, g_sc_mips, g_screen_w);
+    if (g_perf_settings) {   /* the recompiled game wants every cycle: sustained high clocks */
+        PFN_xrPerfSettingsSetPerformanceLevelEXT set = NULL;
+        if (XR_SUCCEEDED(xrGetInstanceProcAddr(g_inst, "xrPerfSettingsSetPerformanceLevelEXT", (PFN_xrVoidFunction *)&set)) && set) {
+            XrResult rc = set(g_sess, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+            XrResult rg = set(g_sess, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+            klog("openxr: performance level sustained-high (cpu %d, gpu %d)\n", (int)rc, (int)rg);
+        }
+    }
     return xr_init_input();
 }
 
@@ -598,8 +610,19 @@ void vid_present(void)
     if (g_flat) { flat_present(); return; }
     poll_events();
     if (!g_running) {
-        struct timespec ts = { 0, 10000000 };
-        nanosleep(&ts, NULL);              /* not visible: keep the game ticking slowly */
+        /* not visible (headset off): pace as the display would (72 Hz),
+         * so the game's timing behaves as when worn */
+        static uint64_t next;
+        struct timespec now;
+        uint64_t t;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        t = (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+        if (!next || t > next + 100000000u) next = t;
+        next += 13888889u;
+        if (next > t) {
+            struct timespec ts = { (time_t)((next - t) / 1000000000u), (long)((next - t) % 1000000000u) };
+            nanosleep(&ts, NULL);
+        }
         return;
     }
     if (XR_FAILED(xrWaitFrame(g_sess, &wi, &fs))) return;

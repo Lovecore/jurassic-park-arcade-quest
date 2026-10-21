@@ -889,7 +889,7 @@ int host_call(rt_cpu *cpu, uint32_t target)
     name = thunk_name(target);
     if (!name) return 0;
     fn = find_lifted(target);
-    if (!strcmp(name, "dlopen")) {
+    if (name[0] == 'd' && !strcmp(name, "dlopen")) {
         const char *lib = gstr(ARG(0));
         if (lib && !lifted_lib(lib)) {
             int i;
@@ -900,7 +900,7 @@ int host_call(rt_cpu *cpu, uint32_t target)
             RET(0xf0000010u + 16u * i);
         }
         g_last_fake = 0;
-    } else if (!strcmp(name, "dlsym") || !strcmp(name, "dlvsym")) {
+    } else if (name[0] == 'd' && (!strcmp(name, "dlsym") || !strcmp(name, "dlvsym"))) {
         uint32_t h = ARG(0);
         if (h >= 0xf0000010u && h < 0xf0000110u) {
             const char *sym = gstr(ARG(1));
@@ -910,11 +910,11 @@ int host_call(rt_cpu *cpu, uint32_t target)
             RET(a);
         }
         g_last_fake = 0;
-    } else if (!strcmp(name, "fclose")) {
+    } else if (name[0] == 'f' && !strcmp(name, "fclose")) {
         if (!ARG(0)) RET(0xffffffffu);            /* fclose(NULL): EOF instead of a crash */
-    } else if (!strcmp(name, "dlclose")) {
+    } else if (name[0] == 'd' && !strcmp(name, "dlclose")) {
         if (ARG(0) >= 0xf0000010u && ARG(0) < 0xf0000110u) RET(0);
-    } else if (!strcmp(name, "dlerror")) {
+    } else if (name[0] == 'd' && !strcmp(name, "dlerror")) {
         if (g_last_fake) { g_last_fake = 0; RET(0); }
     } else {
         /* function of a replaced library */

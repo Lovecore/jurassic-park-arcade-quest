@@ -150,6 +150,130 @@ static void hasp_decrypt(uint32_t buf, uint32_t len)
     }
 }
 
+/* ---- job system worker (0x835c870) ----
+ * The game's worker thread pops jobs from a queue and runs them. The
+ * cabinet build polls that queue nonstop (try-lock, check, unlock: a whole
+ * core, and it hammers the lock the main thread needs). This is the same
+ * loop with a sleep while the queue is empty: the main thread runs any
+ * jobs still queued itself when it flushes, so a sleeping worker never
+ * stalls it. Queue functions: pop 0x8460e55 (8 = empty), push 0x8460d69
+ * (7 = full); job: [0] state (1 running, 2 done), [0x10] fn, [0x14] arg. */
+#define JOB_QUEUE 0x8e7d0c0u
+#define JOB_DONE_QUEUE 0x8e7d060u
+#define QUEUE_POP 0x8460e55u
+#define QUEUE_PUSH 0x8460d69u
+#define QUEUE_COUNT 0x2cu                     /* items queued (maintained under its lock) */
+#define JOB_POOL 0x8e7d094u                   /* job records; +8: jobs submitted since the last flush */
+#define JOB_POOL_ALLOC 0x8461811u
+#define JOB_POOL_RESET 0x8461a6cu
+#define JOB_NEXT_ID 0x8b7f53cu
+
+uint32_t guest_call(rt_cpu *cpu, uint32_t fn, int n, const uint32_t *args);
+
+/* host-side wake-ups (the game's version polls instead) */
+static volatile uint32_t g_job_seq, g_done_seq;
+
+static int queue_pop(rt_cpu *cpu, uint32_t q, uint32_t slot)
+{
+    uint32_t a[2] = { q, slot };
+    wr32(slot, 0);
+    return (int)guest_call(cpu, QUEUE_POP, 2, a);
+}
+
+/* run one popped job and post it to the done queue */
+static void job_run(rt_cpu *cpu, uint32_t job, uint32_t slot)
+{
+    uint32_t r;
+    wr32(job, 1);
+    if (rd32(job + 0x10)) {
+        uint32_t arg = rd32(job + 0x14);
+        guest_call(cpu, rd32(job + 0x10), 1, &arg);
+    }
+    wr32(job, 2);
+    do {
+        uint32_t b[2] = { JOB_DONE_QUEUE, slot };
+        r = guest_call(cpu, QUEUE_PUSH, 2, b);
+    } while (r == 7);                         /* full: retry, as the game does */
+    __atomic_add_fetch(&g_done_seq, 1, __ATOMIC_SEQ_CST);
+    plat_wake32(&g_done_seq, 1);
+}
+
+/* JobWorker(arg): arg 0 = run what is queued and return; else forever */
+static void job_worker(rt_cpu *cpu)
+{
+    uint32_t once = ARG(0) == 0, esp0 = cpu->esp;
+    uint32_t slot = (esp0 - 64) & ~15u;       /* the loop's local (job pointer) */
+    cpu->esp = slot - 16;                     /* guest_call frames go below it */
+    for (;;) {
+        uint32_t seq = __atomic_load_n(&g_job_seq, __ATOMIC_SEQ_CST), job;
+        int r = queue_pop(cpu, JOB_QUEUE, slot);
+        if (r == 8) {                         /* empty: sleep until a submit */
+            if (once) break;
+            if (!rd32(JOB_QUEUE + QUEUE_COUNT)) plat_wait32(&g_job_seq, seq, 5000000);
+            continue;
+        }
+        if (r != 0 || !(job = rd32(slot))) continue;
+        job_run(cpu, job, slot);
+    }
+    cpu->esp = esp0;
+}
+
+/* JobSubmit(fn, arg, tag) -> job id */
+static uint32_t job_submit(rt_cpu *cpu)
+{
+    uint32_t fn = ARG(0), arg = ARG(1), tag = ARG(2), esp0 = cpu->esp, rec, id, node, r, k;
+    if (!fn) return 0;
+    id = rd32(JOB_NEXT_ID) + 1;
+    wr32(JOB_NEXT_ID, id);
+    rec = (esp0 - 64) & ~15u;                 /* the 24-byte record, copied into the pool */
+    cpu->esp = rec - 16;
+    for (k = 0; k < 24; k += 4) wr32(rec + k, 0);
+    wr32(rec + 4, id);
+    wr32(rec + 8, tag);
+    wr32(rec + 0x10, fn);
+    wr32(rec + 0x14, arg);
+    {
+        uint32_t a[3] = { JOB_POOL, rec, 24 };
+        node = guest_call(cpu, JOB_POOL_ALLOC, 3, a);
+    }
+    if (node) {
+        do {
+            uint32_t b[2] = { JOB_QUEUE, rd32(node + 8) };
+            r = guest_call(cpu, QUEUE_PUSH, 2, b);
+        } while (r == 7);
+        __atomic_add_fetch(&g_job_seq, 1, __ATOMIC_SEQ_CST);
+        plat_wake32(&g_job_seq, 0);
+    }
+    cpu->esp = esp0;
+    return id;
+}
+
+/* JobFlush(help): help != 0 runs queued jobs on this thread too; then waits
+ * for every submitted job, drains the done queue and resets the pool */
+static void job_flush(rt_cpu *cpu, int then_call)
+{
+    uint32_t help = ARG(0), esp0 = cpu->esp, slot = (esp0 - 64) & ~15u, job;
+    cpu->esp = slot - 16;
+    while (help) {
+        int r = queue_pop(cpu, JOB_QUEUE, slot);
+        if (r == 8) break;
+        if (r != 0 || !(job = rd32(slot))) continue;
+        job_run(cpu, job, slot);
+    }
+    for (;;) {                                /* the worker's last jobs */
+        uint32_t seq = __atomic_load_n(&g_done_seq, __ATOMIC_SEQ_CST);
+        if (rd32(JOB_DONE_QUEUE + QUEUE_COUNT) == rd32(JOB_POOL + 8)) break;
+        plat_wait32(&g_done_seq, seq, 2000000);
+    }
+    while (queue_pop(cpu, JOB_DONE_QUEUE, slot) != 8) {}
+    {
+        uint32_t a = JOB_POOL;
+        guest_call(cpu, JOB_POOL_RESET, 1, &a);
+    }
+    if (then_call) guest_call(cpu, then_call, 0, NULL);
+    cpu->esp = esp0;
+}
+
 /* ---- RIO ---- */
 #define RIO_CONNECTED_FLAG 0x8e7d61cu
 
@@ -193,6 +317,10 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
         RET(0);
     case 0x836b2a6: wr32(RIO_CONNECTED_FLAG, 0); RET(0);
     case 0x836b33a: case 0x836b4bd: RET(0);           /* RIO_SendReport / RIO_GetReport */
+    case 0x835c870: job_worker(cpu); RET(0);          /* JobWorker(arg) */
+    case 0x835ca20: RET(job_submit(cpu));             /* JobSubmit(fn, arg, tag) */
+    case 0x835caf0: job_flush(cpu, 0); RET(0);        /* JobFlush(help) */
+    case 0x835cbb0: job_flush(cpu, 0x835d3f0); RET(0); /* JobFlush + 0x835d3f0() */
     default:
         kfatal(cpu, "rt_host_fn: no host implementation for %08x", addr);
     }

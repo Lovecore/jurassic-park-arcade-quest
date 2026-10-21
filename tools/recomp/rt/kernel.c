@@ -312,14 +312,27 @@ static void neutralize_host_relocs(uint32_t dyn)
 /* ---- function lookup / dispatch ---- */
 typedef void (*lifted_fn)(rt_cpu *);
 
+/* Both lookups below run on every indirect call and every call into a
+ * replaced library (each GL call): a direct-mapped cache in front of the
+ * binary search, and a hash of the (fixed) thunk table instead of a scan. */
+#define FL_BITS 16
+static uint64_t g_fl_cache[1u << FL_BITS];   /* addr << 32 | (table index + 1) */
+
 lifted_fn find_lifted(uint32_t a)
 {
+    uint32_t h = (a * 2654435761u) >> (32 - FL_BITS);
+    uint64_t e = __atomic_load_n(&g_fl_cache[h], __ATOMIC_RELAXED);
     unsigned lo = 0, hi = rt_func_count;
+    if ((uint32_t)(e >> 32) == a && (uint32_t)e) return rt_func_table[(uint32_t)e - 1].fn;
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
         if (rt_func_table[mid].addr < a) lo = mid + 1; else hi = mid;
     }
-    return (lo < rt_func_count && rt_func_table[lo].addr == a) ? rt_func_table[lo].fn : NULL;
+    if (lo < rt_func_count && rt_func_table[lo].addr == a) {
+        __atomic_store_n(&g_fl_cache[h], (uint64_t)a << 32 | (lo + 1), __ATOMIC_RELAXED);
+        return rt_func_table[lo].fn;
+    }
+    return NULL;
 }
 
 lifted_fn find_resume(uint32_t a)
@@ -332,12 +345,35 @@ lifted_fn find_resume(uint32_t a)
     return (lo < rt_resume_count && rt_resume_table[lo].addr == a) ? rt_resume_table[lo].fn : NULL;
 }
 
+#define TH_BITS 16
+static int32_t g_th_hash[1u << TH_BITS];     /* thunk table index + 1; 0 = empty */
+static int g_th_state;                        /* 0 none, 1 building, 2 ready */
+
+static uint32_t th_slot(uint32_t a) { return (a * 2654435761u) >> (32 - TH_BITS); }
+
+static void th_build(void)
+{
+    int expect = 0;
+    if (__atomic_compare_exchange_n(&g_th_state, &expect, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        unsigned i, n = 0;
+        for (i = 0; rt_thunk_table[i].name; i++) {
+            uint32_t s = th_slot(rt_thunk_table[i].addr);
+            if (++n >= (1u << TH_BITS) / 2) kfatal(NULL, "thunk table too large for its hash");
+            while (g_th_hash[s] && rt_thunk_table[g_th_hash[s] - 1].addr != rt_thunk_table[i].addr)
+                s = (s + 1) & ((1u << TH_BITS) - 1);
+            if (!g_th_hash[s]) g_th_hash[s] = (int32_t)i + 1;   /* first entry wins, as the scan did */
+        }
+        __atomic_store_n(&g_th_state, 2, __ATOMIC_RELEASE);
+    }
+    while (__atomic_load_n(&g_th_state, __ATOMIC_ACQUIRE) != 2) plat_yield();
+}
+
 const char *thunk_name(uint32_t a)
 {
-    unsigned i;
-    for (i = 0; rt_thunk_table[i].name; i++)
-        if (rt_thunk_table[i].addr == a)
-            return rt_thunk_table[i].name;
+    uint32_t s;
+    if (__atomic_load_n(&g_th_state, __ATOMIC_ACQUIRE) != 2) th_build();
+    for (s = th_slot(a); g_th_hash[s]; s = (s + 1) & ((1u << TH_BITS) - 1))
+        if (rt_thunk_table[g_th_hash[s] - 1].addr == a) return rt_thunk_table[g_th_hash[s] - 1].name;
     return dyn_thunk_name(a);
 }
 

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "rt.h"
 #include "kernel.h"
 #include "gl_host.h"
@@ -149,6 +150,7 @@ static struct { uint32_t addr, cap, size; int write, mapped; } g_map[4];
 
 static int gl_manual(rt_cpu *cpu, const char *name)
 {
+    if (name[2] != 'B' && name[2] != 'G' && name[2] != 'M' && name[2] != 'U' && name[2] != 'S') return 0;
     if (!strcmp(name, "glBindBuffer") || !strcmp(name, "glBindBufferARB")) {
         uint32_t t = ARG(0), b = ARG(1);
         int k = t == 0x8892 ? 0 : t == 0x8893 ? 1 : t == 0x88eb ? 2 : t == 0x88ec ? 3 : -1;
@@ -275,11 +277,21 @@ static int gl_dispatch_inner(rt_cpu *cpu, const char *name)
             }
             ns = gl_thunk_count;
         }
-        lo = 0; hi = ns;
-        while (lo < hi) {
-            int mid = (lo + hi) / 2, c = strcmp(sorted[mid]->name, name);
-            if (!c) return sorted[mid]->fn(cpu);
-            if (c < 0) lo = mid + 1; else hi = mid;
+        {   /* name pointer -> thunk (names come from fixed tables; GL is
+             * called from the context's thread only, like the rest of this) */
+            static struct { const char *name; const struct gl_thunk *t; } cache[1024];
+            uint32_t h = (uint32_t)(((uintptr_t)name >> 3) * 2654435761u) >> 22;
+            if (cache[h].name == name) return cache[h].t->fn(cpu);
+            lo = 0; hi = ns;
+            while (lo < hi) {
+                int mid = (lo + hi) / 2, c = strcmp(sorted[mid]->name, name);
+                if (!c) {
+                    cache[h].t = sorted[mid];
+                    cache[h].name = name;
+                    return sorted[mid]->fn(cpu);
+                }
+                if (c < 0) lo = mid + 1; else hi = mid;
+            }
         }
     }
     return 0;
@@ -422,7 +434,21 @@ static int sdl(rt_cpu *cpu, const char *n)
             free(px);
         }
         if (frames < 3) klog("swap on thread %llu\n", (unsigned long long)plat_thread_id());
+        /* frame timing: the game's own work between swaps vs the present */
+        static uint64_t t_out, work_sum, work_max, pres_sum, cpu_out, cpu_sum, cpu_max;
+        static unsigned slow;
+        uint64_t t_in = plat_mono_ns(), work = t_out ? t_in - t_out : 0, cpu_in, cw;
+        struct timespec ts;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);   /* this thread's CPU time: no waits or sleeps */
+        cpu_in = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+        cw = cpu_out ? cpu_in - cpu_out : 0;
+        cpu_sum += cw;
+        if (cw > cpu_max) cpu_max = cw;
+        work_sum += work;
+        if (work > work_max) work_max = work;
+        if (work > 16949152) slow++;                  /* would miss 59 fps */
         vid_present();
+        pres_sum += plat_mono_ns() - t_in;
         {   /* frame pacing: the cabinet ran at the display rate (60 Hz);
              * drivers may ignore the swap interval, so cap here too */
             static double next;
@@ -450,9 +476,20 @@ static int sdl(rt_cpu *cpu, const char *n)
         if ((++frames % 600) == 1) {
             static uint64_t t0;
             uint64_t t = plat_mono_ns();
-            if (t0) klog("frame %u (%.1f fps)\n", frames, 600e9 / (double)(t - t0));
+            if (t0) klog("frame %u (%.1f fps) game %.1f ms avg, %.1f max, %u over 16.9 (cpu %.1f avg, %.1f max); "
+                         "present %.1f ms avg\n",
+                         frames, 600e9 / (double)(t - t0), (double)work_sum / 600e6, (double)work_max / 1e6, slow,
+                         (double)cpu_sum / 600e6, (double)cpu_max / 1e6, (double)pres_sum / 600e6);
             else klog("frame %u\n", frames);
             t0 = t;
+            work_sum = work_max = pres_sum = cpu_sum = cpu_max = 0;
+            slow = 0;
+        }
+        t_out = plat_mono_ns();
+        {
+            struct timespec te;
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &te);
+            cpu_out = (uint64_t)te.tv_sec * 1000000000u + (uint64_t)te.tv_nsec;
         }
         RET(0);
     }
@@ -496,6 +533,9 @@ static int sdl(rt_cpu *cpu, const char *n)
 /* ---- entry from host_call ---- */
 int host_impl(rt_cpu *cpu, const char *name)
 {
+    /* GL first: the bulk of the calls (no string compares on this path) */
+    if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z' && name[2] != 'X')
+        return gl_dispatch(cpu, name);
     if (!strncmp(name, "SDL_", 4)) return sdl(cpu, name);
     if (!strcmp(name, "glXSwapIntervalSGI") || !strcmp(name, "glXSwapIntervalMESA")) {
         /* the cabinet ran with vsync; JPRT_VSYNC=0 to run uncapped */

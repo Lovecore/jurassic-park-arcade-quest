@@ -19,3 +19,9 @@
 0836b2a6 RIO_Disconnect
 0836b33a RIO_SendReport
 0836b4bd RIO_GetReport
+# Job system worker thread: the cabinet build polls its queue nonstop (a
+# spare core); here the worker sleeps and submit / flush wake it (hostgame.c)
+0835c870 JobWorker
+0835ca20 JobSubmit
+0835caf0 JobFlush
+0835cbb0 JobFlushAndFinish
