@@ -1,6 +1,6 @@
 # JP2015 on the Windows PC — assessment and running log
 
-Picks up from `ai_docs/HANDOFF-mac-to-windows.md`. Machine: Windows 11 Pro,
+Picks up from the Mac work (`ai_docs/jp2015-q0-boot/`). Machine: Windows 11 Pro,
 RTX 4080 SUPER (driver 610.88), Ryzen 9 7950X3D, 63 GB RAM. Constraint from
 the user: Windows-only (no Linux install). All downloads go to E:, never C:
 (C: has ~14 GB free). Never commit game files; ask before pushing.
@@ -121,7 +121,7 @@ boots: the rendering is still software and slow. Needs the kit rebuilt
 ## Status log
 
 ### 2026-10-19
-- Pulled `26da632` (handoff doc). Read the handoff, README, plan, Q0 log,
+- Pulled `26da632`. Read the README, plan, Q0 log,
   quest-readiness, box64-probe, kit launcher and x86 setup script.
 - Surveyed the machine (above). Wrote this assessment. Waiting on: dump
   path, OK for TeknoParrot and Docker/WSL2 container use.
