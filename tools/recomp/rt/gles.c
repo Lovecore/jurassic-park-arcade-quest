@@ -120,8 +120,11 @@ enum {
     X_BindBuffer, X_GenBuffers, X_BufferData, X_GenFramebuffers, X_BindFramebuffer,
     X_FramebufferTexture2D, X_ReadPixels, X_GetActiveUniform, X_DrawBuffers, X_ClearDepthf,
     X_DepthRangef, X_GetString, X_MapBufferRange, X_UnmapBuffer, X_Enable, X_Disable, X_Hint,
-    X_ReadBuffer, X_DrawArrays, X_TexParameteriv, X_PixelStorei, X_CheckFramebufferStatus, X_IsTexture, X_BindTexture, X_GetError, X_DrawElements
+    X_ReadBuffer, X_DrawArrays, X_TexParameteriv, X_PixelStorei, X_CheckFramebufferStatus, X_IsTexture, X_BindTexture, X_GetError, X_DrawElements,
+    X_GetFramebufferAttachmentParameteriv, X_FramebufferRenderbuffer
 };
+typedef void (GLAPI_CALL *pf_fbattr)(uint32_t, uint32_t, uint32_t, int32_t *);
+typedef void (GLAPI_CALL *pf_fbrb)(uint32_t, uint32_t, uint32_t, uint32_t);
 
 #define MAXOBJ 16384
 static char *g_sh_src[MAXOBJ];                 /* original desktop source per shader */
@@ -154,6 +157,112 @@ static void compile_es(uint32_t sh, const glsl_es_binds *b)
     const char *s = es;
     P(X_ShaderSource, "glShaderSource", pf_shsrc)(sh, 1, &s, NULL);
     free(es);
+}
+
+/* ES: glDrawBuffers slot i takes COLOR_ATTACHMENTi (or NONE) only. The
+ * game draws single-output passes (motion blur, glow) into
+ * COLOR_ATTACHMENT1/2 of its post-processing FBOs, which desktop GL allows
+ * and the Quest's driver refuses (the pass then lands in attachment 0,
+ * wrecking the velocity map). Here such an FBO gets the attachment-k image
+ * swapped into attachment 0 (and 0's into k) until its draw buffers change
+ * again; the game's own attachment and read-buffer calls are remapped while
+ * swapped. Textures keep their names, so sampling is unaffected. */
+#define MAXFB 1024
+static struct fbswap { uint32_t a, k, type[2], name[2]; int32_t level[2]; } g_fbswap[MAXFB];   /* ATT0+a <-> ATT0+k */
+#define ATT0 0x8CE0u
+
+static void fb_attach(uint32_t att, uint32_t type, uint32_t name, int32_t level)
+{
+    if (type == 0x8D41 /* RENDERBUFFER */)
+        P(X_FramebufferRenderbuffer, "glFramebufferRenderbuffer", pf_fbrb)(0x8CA9, att, 0x8D41, name);
+    else
+        P(X_FramebufferTexture2D, "glFramebufferTexture2D", pf_fbtex)(0x8CA9, att, 0x0DE1, type ? name : 0, level);
+}
+
+static int fb_get(uint32_t att, uint32_t *type, uint32_t *name, int32_t *level)
+{
+    int32_t t = 0, nm = 0, l = 0, face = 0;
+    pf_fbattr q = (pf_fbattr)gl_proc(X_GetFramebufferAttachmentParameteriv, "glGetFramebufferAttachmentParameteriv");
+    q(0x8CA9, att, 0x8CD0 /* OBJECT_TYPE */, &t);
+    if (t) q(0x8CA9, att, 0x8CD1 /* OBJECT_NAME */, &nm);
+    if (t == 0x1702 /* TEXTURE */) {
+        q(0x8CA9, att, 0x8CD2 /* TEXTURE_LEVEL */, &l);
+        q(0x8CA9, att, 0x8CD3 /* CUBE_MAP_FACE */, &face);
+    }
+    *type = (uint32_t)t;
+    *name = (uint32_t)nm;
+    *level = l;
+    return face == 0;                             /* 2D images only */
+}
+
+/* the bound read buffer of fb follows the swap (attachment a <-> k) */
+static void fb_swap_readbuf(uint32_t fb, uint32_t a, uint32_t k)
+{
+    int32_t rfb = 0, rb = 0;
+    P(X_GetIntegerv, "glGetIntegerv", pf_geti)(0x8CAA /* READ_FRAMEBUFFER_BINDING */, &rfb);
+    if ((uint32_t)rfb != fb) return;
+    P(X_GetIntegerv, "glGetIntegerv", pf_geti)(0x0C02 /* READ_BUFFER */, &rb);
+    if ((uint32_t)rb == ATT0 + a) P(X_ReadBuffer, "glReadBuffer", pf_v1)(ATT0 + k);
+    else if ((uint32_t)rb == ATT0 + k) P(X_ReadBuffer, "glReadBuffer", pf_v1)(ATT0 + a);
+}
+
+/* put the bound draw FBO fb into swap state a <-> k (k == 0: as the game
+ * attached it); returns whether that state holds */
+static int fb_swap_to(uint32_t fb, uint32_t a, uint32_t k)
+{
+    struct fbswap *s;
+    if (!fb || fb >= MAXFB || fb == vid_default_fbo()) return k == 0;
+    s = &g_fbswap[fb];
+    if (s->k == k && (!k || s->a == a)) return 1;
+    if (s->k) {
+        fb_attach(ATT0 + s->a, s->type[0], s->name[0], s->level[0]);
+        fb_attach(ATT0 + s->k, s->type[1], s->name[1], s->level[1]);
+        fb_swap_readbuf(fb, s->a, s->k);
+        s->k = 0;
+    }
+    if (k) {
+        if (!fb_get(ATT0 + a, &s->type[0], &s->name[0], &s->level[0]) ||
+            !fb_get(ATT0 + k, &s->type[1], &s->name[1], &s->level[1])) return 0;
+        fb_attach(ATT0 + a, s->type[1], s->name[1], s->level[1]);
+        fb_attach(ATT0 + k, s->type[0], s->name[0], s->level[0]);
+        fb_swap_readbuf(fb, a, k);
+        s->a = a;
+        s->k = k;
+        {
+            static int told;
+            if (told++ < 4)
+                klog("gles: draw buffer slot %u -> COLOR_ATTACHMENT%u emulated by an attachment swap (fb %u)\n", a, k, fb);
+        }
+    }
+    return 1;
+}
+
+/* the physical attachment point for the game's attachment att on fb */
+static uint32_t fb_phys_att(uint32_t fb, uint32_t att)
+{
+    uint32_t k = fb && fb < MAXFB ? g_fbswap[fb].k : 0, a = k ? g_fbswap[fb].a : 0;
+    if (!k) return att;
+    return att == ATT0 + a ? ATT0 + k : att == ATT0 + k ? ATT0 + a : att;
+}
+
+static uint32_t fb_bound(uint32_t target)
+{
+    int32_t fb = 0;
+    P(X_GetIntegerv, "glGetIntegerv", pf_geti)(target == 0x8CA8 /* READ */ ? 0x8CAA : 0x8CA6, &fb);
+    return (uint32_t)fb;
+}
+
+/* the game (re)attaches to fb while it is swapped: keep the swap's record */
+static void fb_note_attach(uint32_t fb, uint32_t att, uint32_t type, uint32_t name, int32_t level)
+{
+    struct fbswap *s = fb && fb < MAXFB ? &g_fbswap[fb] : NULL;
+    int i;
+    if (!s || !s->k) return;
+    i = att == ATT0 + s->a ? 0 : att == ATT0 + s->k ? 1 : -1;
+    if (i < 0) return;
+    s->type[i] = name ? type : 0;
+    s->name[i] = name;
+    s->level[i] = level;
 }
 
 static void check_shader(uint32_t sh)
@@ -396,6 +505,13 @@ int gles_manual(rt_cpu *cpu, const char *n)
                 total += k;
             }
             src[total] = 0;
+            if (getenv("JPRT_SHADER_DUMP")) {     /* dir: the game's source, one file per call */
+                static int k;
+                char path[512];
+                FILE *f;
+                snprintf(path, sizeof(path), "%s/sh_%04d_%u.glsl", getenv("JPRT_SHADER_DUMP"), k++, sh);
+                if ((f = fopen(path, "wb"))) { fwrite(src, 1, total, f); fclose(f); }
+            }
             if (sh >= MAXOBJ) kfatal(cpu, "gles: shader id %u too large", sh);
             free(g_sh_src[sh]);
             g_sh_src[sh] = src;
@@ -509,12 +625,24 @@ int gles_manual(rt_cpu *cpu, const char *n)
             if (!es_cap(ARG(0))) RET(0);
             break;
         }
+        if (!strcmp(n, "glDeleteFramebuffers") || !strcmp(n, "glDeleteFramebuffersEXT")) {
+            uint32_t k, cnt = ARG(0), ids = ARG(1);
+            for (k = 0; ids && k < cnt; k++) {
+                uint32_t id = rd32(ids + 4 * k);
+                if (id < MAXFB) g_fbswap[id].k = 0;
+            }
+            break;                                   /* then the normal call */
+        }
         if (!strcmp(n, "glDrawBuffer")) {
             int32_t fb = 0;
             uint32_t mode = ARG(0);
             P(X_GetIntegerv, "glGetIntegerv", pf_geti)(0x8CA6 /* DRAW_FRAMEBUFFER_BINDING */, &fb);
             if (fb && (mode == 0x0405 || mode == 0x0404 || mode == 0x0408)) mode = 0x8CE0;
             if (!fb && mode != 0) mode = 0x0405;
+            if (fb && mode > ATT0 && mode < ATT0 + 16) {
+                if (fb_swap_to((uint32_t)fb, 0, mode - ATT0)) mode = ATT0;
+            }
+            else fb_swap_to((uint32_t)fb, 0, 0);
             P(X_DrawBuffers, "glDrawBuffers", pf_drawbufs)(1, &mode);
             RET(0);
         }
@@ -530,11 +658,22 @@ int gles_manual(rt_cpu *cpu, const char *n)
                 uint32_t b = src ? rd32(src + 4 * (uint32_t)i) : 0;
                 if (fb && (b == 0x0405 || b == 0x0404 || b == 0x0408 || b == 0x0402)) b = 0x8CE0 + (uint32_t)i;
                 else if (!fb && b >= 0x8CE0 && b < 0x8CF0) b = 0x0405;
-                if (fb && b >= 0x8CE0 && b < 0x8CF0 && b != 0x8CE0 + (uint32_t)i) {
-                    static int warned;
-                    if (!warned++) klog("gles: glDrawBuffers slot %d -> attachment %u (unsupported in ES)\n", i, b - 0x8CE0);
-                }
                 bufs[i] = b;
+            }
+            {   /* one slot i naming attachment k != i (k named by no other
+                 * slot): swap attachment k into place i (fb_swap_to) */
+                int bad = -1, nbad = 0;
+                for (i = 0; fb && i < cnt; i++)
+                    if (bufs[i] >= ATT0 && bufs[i] < ATT0 + 16 && bufs[i] != ATT0 + (uint32_t)i) { bad = i; nbad++; }
+                if (nbad == 1 && bufs[bad] - ATT0 >= (uint32_t)cnt) {
+                    if (fb_swap_to((uint32_t)fb, (uint32_t)bad, bufs[bad] - ATT0)) bufs[bad] = ATT0 + (uint32_t)bad;
+                } else {
+                    if (nbad) {
+                        static int warned;
+                        if (!warned++) klog("gles: glDrawBuffers with %d remapped slots (unsupported in ES)\n", nbad);
+                    }
+                    fb_swap_to((uint32_t)fb, 0, 0);
+                }
             }
             P(X_DrawBuffers, "glDrawBuffers", pf_drawbufs)(cnt, bufs);
             RET(0);
@@ -645,7 +784,12 @@ int gles_manual(rt_cpu *cpu, const char *n)
                 P(X_BindTexture, "glBindTexture", pf_v2)(bt, prev);
                 klog("gles: created never-bound texture %u for an FBO attachment\n", tex);
             }
-            P(X_FramebufferTexture2D, "glFramebufferTexture2D", pf_fbtex)(ARG(0), ARG(1), target, tex, (int32_t)ARG(4));
+            {   /* a swapped FBO (fb_swap_to): attach at the physical point */
+                uint32_t fb = fb_bound(ARG(0));
+                fb_note_attach(fb, ARG(1), 0x1702, tex, (int32_t)ARG(4));
+                P(X_FramebufferTexture2D, "glFramebufferTexture2D", pf_fbtex)(ARG(0), fb_phys_att(fb, ARG(1)), target, tex,
+                                                                             (int32_t)ARG(4));
+            }
             if (getenv("JPRT_GLCHECK")) {
                 uint32_t e = ((uint32_t (GLAPI_CALL *)(void))gl_proc(X_GetError, "glGetError"))();
                 if (e) {
@@ -663,6 +807,12 @@ int gles_manual(rt_cpu *cpu, const char *n)
             }
             RET(0);
         }
+        if (!strcmp(n, "glFramebufferRenderbuffer") || !strcmp(n, "glFramebufferRenderbufferEXT")) {
+            uint32_t fb = fb_bound(ARG(0));
+            fb_note_attach(fb, ARG(1), 0x8D41, ARG(3), 0);
+            P(X_FramebufferRenderbuffer, "glFramebufferRenderbuffer", pf_fbrb)(ARG(0), fb_phys_att(fb, ARG(1)), ARG(2), ARG(3));
+            RET(0);
+        }
         break;
     case 'R':
         if (!strcmp(n, "glReadBuffer")) {
@@ -670,6 +820,7 @@ int gles_manual(rt_cpu *cpu, const char *n)
             uint32_t mode = ARG(0);
             P(X_GetIntegerv, "glGetIntegerv", pf_geti)(0x8CAA, &fb);
             if (fb && (mode == 0x0405 || mode == 0x0404)) mode = 0x8CE0;
+            if (fb) mode = fb_phys_att((uint32_t)fb, mode);
             P(X_ReadBuffer, "glReadBuffer", pf_v1)(mode);
             RET(0);
         }

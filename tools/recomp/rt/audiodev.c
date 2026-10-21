@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "audiodev.h"
+#include "rt.h"
+#include "kernel.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -79,14 +81,42 @@ void adev_close(void)
 
 #elif defined(__ANDROID__)
 #include <aaudio/AAudio.h>
+#include <stdatomic.h>
 
+/* The game mixes on its own threads (audio_pump) whenever they pass through
+ * SDL; AAudio's data callback plays from a ring between the two at the
+ * device's rate. The fill level is known exactly from the ring indices, so
+ * the game is paced without blocking its render thread. */
 static AAudioStream *g_st;
 static uint32_t g_chunk, g_frame_bytes;
-static int32_t g_target_frames;
+static int32_t g_target_frames;               /* ring fill the game keeps topped up */
+#define RING_FRAMES 32768                     /* power of two */
+static int16_t *g_ring;                       /* interleaved, g_frame_bytes per frame */
+static int g_ch;
+static _Atomic uint64_t g_wr, g_rd;           /* frames written / played */
+static _Atomic uint32_t g_underruns;
+
+static aaudio_data_callback_result_t data_cb(AAudioStream *st, void *user, void *audio, int32_t frames)
+{
+    uint64_t rd = atomic_load_explicit(&g_rd, memory_order_relaxed);
+    uint64_t wr = atomic_load_explicit(&g_wr, memory_order_acquire);
+    int32_t have = (int32_t)(wr - rd), n = have < frames ? have : frames, i;
+    int16_t *out = audio;
+    (void)st; (void)user;
+    for (i = 0; i < n; i++)
+        memcpy(out + (size_t)i * g_ch, g_ring + (size_t)((rd + (uint64_t)i) & (RING_FRAMES - 1)) * g_ch, g_frame_bytes);
+    if (n < frames) {
+        memset(out + (size_t)n * g_ch, 0, (size_t)(frames - n) * g_frame_bytes);
+        if (wr) atomic_fetch_add_explicit(&g_underruns, 1, memory_order_relaxed);
+    }
+    atomic_store_explicit(&g_rd, rd + (uint64_t)n, memory_order_release);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
 
 int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int nbuf)
 {
     AAudioStreamBuilder *b;
+    int32_t chunk_frames;
     if (bits != 16) return -1;
     if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return -1;
     AAudioStreamBuilder_setSampleRate(b, (int32_t)freq);
@@ -94,26 +124,49 @@ int adev_open(uint32_t freq, int channels, int bits, uint32_t chunk_bytes, int n
     AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
-    if (AAudioStreamBuilder_openStream(b, &g_st) != AAUDIO_OK) { AAudioStreamBuilder_delete(b); return -1; }
-    AAudioStreamBuilder_delete(b);
+    AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_GAME);
+    AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_MUSIC);
+    AAudioStreamBuilder_setDataCallback(b, data_cb, NULL);
     g_chunk = chunk_bytes;
+    g_ch = channels;
     g_frame_bytes = (uint32_t)(channels * bits / 8);
-    g_target_frames = (int32_t)(chunk_bytes / g_frame_bytes) * nbuf;
-    AAudioStream_setBufferSizeInFrames(g_st, g_target_frames);
+    chunk_frames = (int32_t)(chunk_bytes / g_frame_bytes);
+    /* the game's own queue depth, but at least ~120 ms: its threads only
+     * reach SDL once per frame and hitch on loads */
+    g_target_frames = chunk_frames * nbuf;
+    if (g_target_frames < (int32_t)freq / 8) g_target_frames = (int32_t)freq / 8;
+    if (getenv("JPRT_AUDIO_MS")) g_target_frames = (int32_t)((int64_t)freq * atoi(getenv("JPRT_AUDIO_MS")) / 1000);
+    if (g_target_frames > RING_FRAMES - chunk_frames) g_target_frames = RING_FRAMES - chunk_frames;
+    g_ring = calloc(RING_FRAMES, g_frame_bytes);
+    if (!g_ring || AAudioStreamBuilder_openStream(b, &g_st) != AAUDIO_OK) { AAudioStreamBuilder_delete(b); return -1; }
+    AAudioStreamBuilder_delete(b);
+    klog("audio: AAudio %d Hz callback, burst %d, game keeps %d frames queued\n", AAudioStream_getSampleRate(g_st),
+         AAudioStream_getFramesPerBurst(g_st), g_target_frames);
     AAudioStream_requestStart(g_st);
     return 0;
 }
 
 int adev_free_chunks(void)
 {
-    int64_t queued = AAudioStream_getFramesWritten(g_st) - AAudioStream_getFramesRead(g_st);
+    static uint64_t last_log;
+    int64_t queued = (int64_t)(atomic_load(&g_wr) - atomic_load(&g_rd));
     int64_t room = (int64_t)g_target_frames - queued;
+    uint64_t rd = atomic_load(&g_rd);
+    if (rd - last_log > 44100ull * 30) {          /* every ~30 s of audio */
+        last_log = rd;
+        klog("audio: %u device underruns so far\n", atomic_load(&g_underruns));
+    }
     return room <= 0 ? 0 : (int)(room / (int64_t)(g_chunk / g_frame_bytes));
 }
 
 void adev_submit(const void *data)
 {
-    AAudioStream_write(g_st, data, (int32_t)(g_chunk / g_frame_bytes), 0);
+    uint64_t wr = atomic_load_explicit(&g_wr, memory_order_relaxed);
+    uint32_t frames = g_chunk / g_frame_bytes, i;
+    const int16_t *in = data;
+    for (i = 0; i < frames; i++)
+        memcpy(g_ring + (size_t)((wr + i) & (RING_FRAMES - 1)) * g_ch, in + (size_t)i * g_ch, g_frame_bytes);
+    atomic_store_explicit(&g_wr, wr + frames, memory_order_release);
 }
 
 void adev_close(void)
