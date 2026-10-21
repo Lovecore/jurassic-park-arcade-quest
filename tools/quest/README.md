@@ -67,14 +67,38 @@ line:
 - `JPRT_CORES=all`: let guest threads use every core (the default pins
   them to one core for x86 memory ordering).
 - `JPRT_AUDIO=0`: turn audio off.
-- `JPRT_DECODE_DXT=1`: force software texture decoding.
+- `JPRT_NATIVE_DXT=1`: upload S3TC textures natively where the GPU supports them (the default decodes them in software, as the Quest needs anyway).
 - `JPRT_SHOT_EVERY=N`: save a frame every N frames.
 
-## Status
+## Status (2026-10-20)
 
-- Built, not yet run on a headset.
-- Everything except the Android shell (EGL, OpenXR, AAudio) is tested on
-  the PC. The PC test uses the same GLES path on an OpenGL ES 3.2 context
-  (`JPRT_GLES=1 sh tools/recomp/run.sh`).
-- Next: stereo 3D (render the game's camera per eye, using the engine's
-  OVR mode 2), and P2 aim from the left controller.
+Verified:
+- **PC, OpenGL ES 3.2 context:** attract mode and gameplay, using the same
+  GLES path the headset uses (`JPRT_GLES=1 sh tools/recomp/run.sh`).
+- **Android emulator (API 36, x86_64), flat mode:** both the x86_64 APK and
+  the arm64 APK (under the emulator's ARM translation) do the same things:
+  - boot, attract mode, audio device open;
+  - P1 joins with key 4;
+  - level 1 plays, and tapping moves the gun reticle.
+- **Android XR emulator (API 34):** the OpenXR path works.
+  - The runtime is found and the session reaches FOCUSED.
+  - The sRGB swapchain is created.
+  - The game shows as the screen quad in the composited headset view
+    (`ai_docs/quest-recomp/android-xr-emulator-openxr-2026-10-20.png`).
+
+Not yet verified (needs the headset):
+- Quest runtime specifics: Touch controller bindings, the
+  `glCopyImageSubData` frame copy on ES 3.2, frame rate on the XR2 Gen 2.
+- arm64 memory ordering with `JPRT_CORES=all`. The default, one core for
+  guest threads, is the safe setting.
+
+Data push: when adb cannot create directories in the app's storage (seen
+on the XR emulator), `push_data.sh` sends a single `data.tar` instead. The
+app unpacks it on its next start. You can force this with
+`MODE=tar sh tools/quest/push_data.sh`.
+
+Next:
+- Stereo 3D: render the game's camera per eye, using the engine's OVR
+  mode 2.
+- P2 aim from the left controller.
+- Performance: a multi-core memory model, and `-O3` / LTO.

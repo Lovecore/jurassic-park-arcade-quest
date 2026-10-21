@@ -197,6 +197,21 @@ static int xr_init_input(void)
     sb.countSuggestedBindings = (uint32_t)n;
     sb.suggestedBindings = b;
     XRCHK(xrSuggestInteractionProfileBindings(g_inst, &sb));
+    {   /* generic controllers (other runtimes, emulators): aim, select = fire, menu = start */
+        XrActionSuggestedBinding g[6];
+        XrInteractionProfileSuggestedBinding gs = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+        int k = 0;
+        g[k].action = g_a_aim; g[k++].binding = path("/user/hand/left/input/aim/pose");
+        g[k].action = g_a_aim; g[k++].binding = path("/user/hand/right/input/aim/pose");
+        g[k].action = g_a_trigger; g[k++].binding = path("/user/hand/left/input/select/click");
+        g[k].action = g_a_trigger; g[k++].binding = path("/user/hand/right/input/select/click");
+        g[k].action = g_a_btn[0]; g[k++].binding = path("/user/hand/right/input/menu/click");
+        g[k].action = g_a_btn[2]; g[k++].binding = path("/user/hand/left/input/menu/click");
+        gs.interactionProfile = path("/interaction_profiles/khr/simple_controller");
+        gs.countSuggestedBindings = (uint32_t)k;
+        gs.suggestedBindings = g;
+        if (XR_FAILED(xrSuggestInteractionProfileBindings(g_inst, &gs))) klog("openxr: simple_controller bindings refused\n");
+    }
     for (i = 0; i < 2; i++) {
         XrActionSpaceCreateInfo sci = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
         sci.action = g_a_aim;

@@ -8,7 +8,7 @@
 #
 # Env: ANDROID_SDK (default E:/choom/tools/android-sdk), NDK (default newest
 #      in $ANDROID_SDK/ndk), JAVA_HOME (default Android Studio's JBR),
-#      JOBS (16), OPT (-O1), ABI (arm64-v8a; x86_64 for the Android emulator,
+#      JOBS (16), OPT (-O2), ABI (arm64-v8a; x86_64 for the Android emulator,
 #      which runs the flat-screen mode)
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +20,7 @@ BT=$(ls -d "$SDK"/build-tools/* | tail -1)
 PLATFORM=$(ls -d "$SDK"/platforms/android-* | tail -1)
 JAVA_HOME=${JAVA_HOME:-"/c/Program Files/Android/Android Studio/jbr"}
 JOBS=${JOBS:-16}
-OPT=${OPT:--O1}
+OPT=${OPT:--O2}
 API=29
 ABI=${ABI:-arm64-v8a}
 case "$ABI" in arm64-v8a) TRIPLE=aarch64 ;; x86_64) TRIPLE=x86_64 ;; *) echo "ABI: arm64-v8a or x86_64"; exit 1 ;; esac
@@ -28,7 +28,7 @@ CC="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe"
 XR="$ROOT/ext/openxr/aar"
 O="$HERE/out"
 [ "$ABI" = arm64-v8a ] || O="$HERE/out-$ABI"
-OBJ="$O/obj"
+OBJ="$O/obj$OPT"            # per optimisation level
 LIBDIR="$O/apk/lib/$ABI"
 mkdir -p "$OBJ" "$LIBDIR"
 
