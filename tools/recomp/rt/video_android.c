@@ -300,6 +300,7 @@ static int xr_init_session(void)
     /* a full mip chain (rebuilt each frame) so the compositor minifies the
      * screen cleanly when it is small or far; plain level 0 if refused */
     for (g_sc_mips = 1; (g_w >> g_sc_mips) || (g_h >> g_sc_mips); g_sc_mips++) {}
+    if (stereo_enabled()) g_sc_mips = 1;          /* VR: eye images are shown 1:1 */
     swi.mipCount = g_sc_mips;
     if (XR_FAILED(xrCreateSwapchain(g_sess, &swi, &g_sc))) {
         klog("openxr: mipmapped swapchain refused, using one level\n");
@@ -372,7 +373,80 @@ uint32_t vid_default_fbo(void) { return g_fbo; }
 void vid_set_title(const char *t) { (void)t; }
 void vid_swap_interval(int n) { (void)n; }    /* xrWaitFrame paces */
 void vid_screen_size(int *w, int *h) { *w = g_w ? g_w : 1360; *h = g_h ? g_h : 768; }
-void vid_head_orientation(float q[4]) { q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f; }   /* stage 2: a 3D screen, no head tracking */
+/* ---- VR (JPRT_VR): the engine's eyes as an OpenXR projection layer ----
+ * Each eye renders with a symmetric frustum (half angles g_fov_xh /
+ * g_fov_yh, wide enough to cover the Quest 3's lenses) and the head
+ * orientation predicted for the frame's display time; the layer declares
+ * exactly that field and pose, so the compositor shows the image with the
+ * right geometry. Head position is not given to the engine (yet). */
+static void quat_rotate(const XrQuaternionf *q, const XrVector3f *v, XrVector3f *o);
+static float g_fov_xh = 0.9425f, g_fov_yh = 0.9599f;   /* 54 and 55 degrees: the Quest 3's widest per eye */
+static XrView g_view_render[2];                        /* poses the game is rendering with */
+static int g_have_views;
+static XrQuaternionf g_recenter = { 0, 0, 0, 1 };       /* yaw removed from the head pose */
+static XrQuaternionf g_head_game = { 0, 0, 0, 1 };      /* what VidOVRGetOrientation returns */
+
+void vid_eye_size(int *w, int *h)
+{
+    int eh = getenv("JPRT_EYE_H") ? atoi(getenv("JPRT_EYE_H")) : 1216;
+    *h = eh;
+    *w = ((int)((float)eh * tanf(g_fov_xh) / tanf(g_fov_yh) + 1.0f)) & ~1;
+    if (!stereo_enabled()) { *w = 1360; *h = 768; }
+}
+
+float vid_eye_half_yfov(void) { return g_fov_yh; }
+
+void vid_head_orientation(float q[4])
+{
+    q[0] = g_head_game.x; q[1] = g_head_game.y; q[2] = g_head_game.z; q[3] = g_head_game.w;
+}
+
+static XrQuaternionf quat_mul(XrQuaternionf a, XrQuaternionf b)
+{
+    XrQuaternionf r;
+    r.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
+    r.x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y;
+    r.y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x;
+    r.z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w;
+    return r;
+}
+
+/* the yaw of q undone: forward (0,0,-1) turned by a yaw a is (-sin a, 0, -cos a) */
+static XrQuaternionf yaw_inverse(XrQuaternionf q)
+{
+    XrVector3f f = { 0, 0, -1 }, d;
+    XrQuaternionf r = { 0, 0, 0, 1 };
+    float a;
+    quat_rotate(&q, &f, &d);
+    a = atan2f(-d.x, -d.z);
+    r.y = sinf(-a * 0.5f);
+    r.w = cosf(-a * 0.5f);
+    return r;
+}
+
+/* views for the frame the game renders next (its display time t) */
+static void vr_locate(XrTime t)
+{
+    XrViewLocateInfo li = { XR_TYPE_VIEW_LOCATE_INFO };
+    XrViewState vs = { XR_TYPE_VIEW_STATE };
+    XrView v[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+    uint32_t n = 0;
+    static int logged;
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = t;
+    li.space = g_local;
+    if (XR_FAILED(xrLocateViews(g_sess, &li, &vs, 2, &n, v)) || n != 2 ||
+        !(vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) return;
+    if (!logged++)
+        klog("vr: display fov L %.1f/%.1f/%.1f/%.1f R %.1f/%.1f/%.1f/%.1f deg; rendering +-%.1f x +-%.1f\n",
+             v[0].fov.angleLeft * 57.2958f, v[0].fov.angleRight * 57.2958f, v[0].fov.angleUp * 57.2958f,
+             v[0].fov.angleDown * 57.2958f, v[1].fov.angleLeft * 57.2958f, v[1].fov.angleRight * 57.2958f,
+             v[1].fov.angleUp * 57.2958f, v[1].fov.angleDown * 57.2958f, g_fov_xh * 57.2958f, g_fov_yh * 57.2958f);
+    g_view_render[0] = v[0];
+    g_view_render[1] = v[1];
+    g_head_game = quat_mul(g_recenter, v[0].pose.orientation);   /* the eyes share the head's orientation */
+    g_have_views = 1;
+}
 
 void *vid_gl_proc(const char *name)
 {
@@ -464,6 +538,7 @@ static void recenter(XrTime t)
     g_screen.position.x = loc.pose.position.x;
     g_screen.position.y = loc.pose.position.y;
     g_screen.position.z = loc.pose.position.z - 2.4f;
+    g_recenter = yaw_inverse(loc.pose.orientation);   /* VR: the game's forward is where you look now */
 }
 
 static void poll_input(XrTime t)
@@ -615,6 +690,9 @@ void vid_present(void)
     XrFrameBeginInfo bi = { XR_TYPE_FRAME_BEGIN_INFO };
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
     XrCompositionLayerQuad quad[2] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    XrCompositionLayerProjection proj = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW },
+                                               { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     const XrCompositionLayerBaseHeader *layers[2];
     static int centred;
     if (!g_ready) return;
@@ -685,34 +763,51 @@ void vid_present(void)
                 if (e && checked++ < 3) klog("openxr: frame copy GL error %#x\n", e);
             }
             xrReleaseSwapchainImage(g_sc, &ri);
-            /* mono: one screen for both eyes; stereo: the frame holds both
-             * eyes side by side, each eye's layer shows its own half */
-            {
-                int n = stereo_enabled() ? 2 : 1, e;
-                for (e = 0; e < n; e++) {
-                    quad[e].space = g_local;
-                    quad[e].eyeVisibility = n == 1 ? XR_EYE_VISIBILITY_BOTH
-                                                   : e == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
-                    quad[e].subImage.swapchain = g_sc;
-                    quad[e].subImage.imageRect.offset.x = e * screen_px_w();
-                    quad[e].subImage.imageRect.extent.width = screen_px_w();
-                    quad[e].subImage.imageRect.extent.height = g_h;
-                    quad[e].pose = g_screen;
-                    quad[e].size.width = g_screen_w;
-                    quad[e].size.height = g_screen_h;
-                    if (g_layer_settings) {
-                        static XrCompositionLayerSettingsFB ls = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
-                        ls.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
-                                        XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
-                        quad[e].next = &ls;
-                    }
-                    layers[e] = (const XrCompositionLayerBaseHeader *)&quad[e];
+            if (stereo_enabled() && g_have_views) {
+                /* VR: the frame holds both eyes side by side, rendered with
+                 * g_view_render's poses and the symmetric field below */
+                int e;
+                for (e = 0; e < 2; e++) {
+                    pv[e].pose = g_view_render[e].pose;
+                    pv[e].fov.angleLeft = -g_fov_xh;
+                    pv[e].fov.angleRight = g_fov_xh;
+                    pv[e].fov.angleUp = g_fov_yh;
+                    pv[e].fov.angleDown = -g_fov_yh;
+                    pv[e].subImage.swapchain = g_sc;
+                    pv[e].subImage.imageRect.offset.x = e * screen_px_w();
+                    pv[e].subImage.imageRect.extent.width = screen_px_w();
+                    pv[e].subImage.imageRect.extent.height = g_h;
                 }
-                ei.layerCount = (uint32_t)n;
+                proj.space = g_local;
+                proj.viewCount = 2;
+                proj.views = pv;
+                layers[0] = (const XrCompositionLayerBaseHeader *)&proj;
+                ei.layerCount = 1;
+                ei.layers = layers;
+            } else if (!stereo_enabled()) {
+                /* the cabinet screen: one quad for both eyes */
+                quad[0].space = g_local;
+                quad[0].eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad[0].subImage.swapchain = g_sc;
+                quad[0].subImage.imageRect.extent.width = g_w;
+                quad[0].subImage.imageRect.extent.height = g_h;
+                quad[0].pose = g_screen;
+                quad[0].size.width = g_screen_w;
+                quad[0].size.height = g_screen_h;
+                if (g_layer_settings) {
+                    static XrCompositionLayerSettingsFB ls = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
+                    ls.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                    XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+                    quad[0].next = &ls;
+                }
+                layers[0] = (const XrCompositionLayerBaseHeader *)&quad[0];
+                ei.layerCount = 1;
                 ei.layers = layers;
             }
         }
     }
     xrEndFrame(g_sess, &ei);
+    /* the game renders its next frame for the display time after this one */
+    if (stereo_enabled()) vr_locate(fs.predictedDisplayTime + fs.predictedDisplayPeriod);
 }
 #endif

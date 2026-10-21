@@ -24,6 +24,8 @@ void vid_log_context(void);
  * side into the default framebuffer, each eye w x h */
 int stereo_enabled(void);
 void stereo_eye_size(int *w, int *h);
+void vid_eye_size(int *w, int *h);      /* one eye's image */
+float vid_eye_half_yfov(void);          /* radians, symmetric; the width follows the eye aspect */
 void vid_head_orientation(float q[4]);  /* x y z w, the engine's camera frame */
 
 /* hostlibs.c: queue a guest SDL_Event (20 bytes) */

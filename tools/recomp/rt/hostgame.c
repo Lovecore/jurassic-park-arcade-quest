@@ -294,24 +294,20 @@ extern int g_vp_shift_x;                    /* hostlibs.c */
 #define RENDER_LAYER_RENDER 0x8302210u      /* RenderLayerRender(layer data, screen) */
 
 int g_stereo = -1;                             /* JPRT_STEREO; video_*.c reads it */
-static float g_stereo_ipd = 0.064f, g_stereo_yfov = 60.0f;
+static float g_stereo_ipd = 0.064f;
 
 int stereo_enabled(void)
 {
     if (g_stereo < 0) {
-        g_stereo = getenv("JPRT_STEREO") ? atoi(getenv("JPRT_STEREO")) : 0;
+        /* JPRT_VR (the headset) or JPRT_STEREO (side-by-side preview) */
+        g_stereo = (getenv("JPRT_VR") && atoi(getenv("JPRT_VR"))) || (getenv("JPRT_STEREO") && atoi(getenv("JPRT_STEREO")));
         if (getenv("JPRT_IPD")) g_stereo_ipd = (float)atof(getenv("JPRT_IPD"));
-        if (getenv("JPRT_YFOV")) g_stereo_yfov = (float)atof(getenv("JPRT_YFOV"));
     }
     return g_stereo;
 }
 
 /* one eye: the cabinet's 1360x768 unless JPRT_EYE_W / JPRT_EYE_H */
-void stereo_eye_size(int *w, int *h)
-{
-    *w = getenv("JPRT_EYE_W") ? atoi(getenv("JPRT_EYE_W")) : 1360;
-    *h = getenv("JPRT_EYE_H") ? atoi(getenv("JPRT_EYE_H")) : 768;
-}
+void stereo_eye_size(int *w, int *h) { vid_eye_size(w, h); }
 
 static void wrf(uint32_t a, float v) { wrf32(a, v); }
 
@@ -382,7 +378,7 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
     case 0x81b9c10:                                   /* ParseCommandLineArgs (wrapped) */
         fo_081b9c10(cpu);                             /* the game's own; returns to its caller */
         if (stereo_enabled()) {
-            klog("stereo: display mode 2 (engine OVR path), ipd %.3f, yfov %.1f\n", g_stereo_ipd, g_stereo_yfov);
+            klog("stereo: display mode 2 (engine OVR path), ipd %.3f\n", g_stereo_ipd);
             wr32(GAME_DISPLAY_MODE, 2);
         }
         return;
@@ -423,9 +419,11 @@ void rt_host_fn(rt_cpu *cpu, uint32_t addr)
     case 0x835dfd0: {                                 /* VidOVRGetProjParams(float *yfov, *aspect, *offset) */
         int w = 1360, h = 768;
         stereo_eye_size(&w, &h);
-        wrf(ARG(0), g_stereo_yfov);
+        /* the engine renders tan(0.65 * yfov) (1.3x the DK2's field, for
+         * its lens warp): yfov in radians = wanted half-angle / 0.65 */
+        wrf(ARG(0), vid_eye_half_yfov() / 0.65f);
         wrf(ARG(1), (float)w / (float)h);
-        wrf(ARG(2), 0.0f);                            /* parallel eyes, centred projections */
+        wrf(ARG(2), 0.0f);                            /* centred projections */
         RET(0);
     }
     case 0x835dfe0:                                   /* float VidOVRGetIPDistance(void): in st(0) */

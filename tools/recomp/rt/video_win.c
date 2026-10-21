@@ -172,6 +172,14 @@ void vid_screen_size(int *w, int *h)
     *h = GetSystemMetrics(SM_CYSCREEN);
 }
 
+/* stereo preview (JPRT_STEREO): two cabinet-sized eyes side by side */
+void vid_eye_size(int *w, int *h)
+{
+    *w = getenv("JPRT_EYE_W") ? atoi(getenv("JPRT_EYE_W")) : 1360;
+    *h = getenv("JPRT_EYE_H") ? atoi(getenv("JPRT_EYE_H")) : 768;
+}
+float vid_eye_half_yfov(void) { return getenv("JPRT_HALF_YFOV") ? (float)atof(getenv("JPRT_HALF_YFOV")) : 0.5236f; }
+
 /* stereo: no head tracking on the desktop */
 void vid_head_orientation(float q[4]) { q[0] = q[1] = q[2] = 0.0f; q[3] = 1.0f; }
 #endif

@@ -119,7 +119,39 @@ To profile: `adb push $NDK/simpleperf/bin/android/arm64/simpleperf
 profileable).
 
 Next:
-- Stereo 3D: render the game's camera per eye, using the engine's OVR
-  mode 2.
 - P2 aim from the left controller.
 - Performance: a multi-core memory model, and `-O3` / LTO.
+
+## Experimental: stereo and full VR (off; for tinkerers)
+
+The shipped experience is the large flat screen. The code below works but
+is **disabled by default**: on 2026-10-21 full head-tracked VR made the
+tester motion sick (the rail camera never stops moving), and the stereo
+"3D screen" looked wrong. Nothing here runs unless you set it in
+`files/jprt.env` (or the environment on the PC).
+
+- `JPRT_VR=1` (Quest): full VR. The engine's compiled-out Oculus DK2 path
+  (display mode 2) renders both eyes; the frame goes out as an OpenXR
+  projection layer with the head orientation predicted for its display time
+  (`rt/video_android.c`, "VR" section). Runs at 72 fps with 1306x1216
+  eyes. `JPRT_EYE_H` sets the eye height; the field is symmetric (54 x 55
+  degrees half angles: the Quest 3 lenses' widest). Not done: head position,
+  the HUD as a floating panel (it is drawn into each eye), aiming with the
+  controller ray, comfort options.
+- `JPRT_STEREO=1`: both eyes side by side, for a preview on the PC
+  (`sh tools/recomp/run.sh`; `JPRT_EYE_W` / `JPRT_EYE_H`, `JPRT_HALF_YFOV`).
+- `JPRT_IPD`: eye separation in game units (default 0.064).
+
+How it hooks the engine (`rt/hostgame.c`, `host_funcs.txt`):
+- `ParseCommandLineArgs` (0x81b9c10) is wrapped (lift.py `wrap`: the lifted
+  body stays as `fo_<addr>`) to set display mode 2 at 0x8db4e6c.
+- The seven VidOVR stubs (0x835dfa0-0x835e000) are host functions:
+  one-eye resolution, projection (the engine renders `tan(0.65 * yfov)`,
+  yfov in radians), IPD (returned in st(0)), head orientation (x y z w, the
+  same axes as OpenXR), identity lens warp for shaderOVR.
+- The engine sees a one-eye display split into two half-width "screens";
+  the real framebuffer is two eyes wide and `hostlibs.c` doubles viewports
+  and scissors aimed at it.
+- Mode 2 skips the 2D layers 1-6 (HUD, logos, attract text):
+  `RenderLoop_RenderLayer` (0x8305bc0) is wrapped to draw them per eye.
+- `JPRT_VPLOG=<frame>` traces one frame's GL targets, viewports and draws.
