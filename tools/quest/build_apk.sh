@@ -48,7 +48,7 @@ ls "$RC"/out/c_all/lifted_*.c "$RC/out/c_all/table.c" "$RC/out/c_all/thunks.c" "
 for o in "$OBJ"/lifted_*.o; do [ -e "$RC/out/c_all/$(basename "$o" .o).c" ] || rm -f "$o"; done
 
 echo "compiling the runtime..."
-for s in kernel syscalls hostlibs hostaudio audiodev hostgame gles glsl_es texdecode plat_posix video_android android_main; do
+for s in kernel syscalls hostlibs hostaudio hostvorbis audiodev hostgame gles glsl_es texdecode plat_posix video_android android_main; do
     "$CC" $RT_FLAGS -c "$RC/rt/$s.c" -o "$OBJ/rt_$s.o"
 done
 "$CC" $CFLAGS -w -c "$NDK/sources/android/native_app_glue/android_native_app_glue.c" -o "$OBJ/native_app_glue.o"

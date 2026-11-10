@@ -360,6 +360,7 @@ static int gl_dispatch(rt_cpu *cpu, const char *name)
 
 /* ---- SDL 1.2 ---- */
 int sdl_audio(rt_cpu *cpu, const char *n);      /* hostaudio.c */
+int host_vorbis(rt_cpu *cpu, const char *n);    /* hostvorbis.c: ov_* (libvorbisfile) */
 void audio_pump(rt_cpu *cpu);
 void game_select_input_maps(void);         /* hostgame.c */
 
@@ -563,6 +564,7 @@ int host_impl(rt_cpu *cpu, const char *name)
     if (name[0] == 'g' && name[1] == 'l' && name[2] >= 'A' && name[2] <= 'Z' && name[2] != 'X')
         return gl_dispatch(cpu, name);
     if (!strncmp(name, "SDL_", 4)) return sdl(cpu, name);
+    if (name[0] == 'o' && name[1] == 'v' && name[2] == '_') return host_vorbis(cpu, name);   /* libvorbisfile */
     if (!strcmp(name, "glXSwapIntervalSGI") || !strcmp(name, "glXSwapIntervalMESA")) {
         /* the cabinet ran with vsync; JPRT_VSYNC=0 to run uncapped */
         g_swap_interval = getenv("JPRT_VSYNC") ? atoi(getenv("JPRT_VSYNC")) : (int)ARG(0);
