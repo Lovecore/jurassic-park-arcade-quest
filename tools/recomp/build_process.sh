@@ -35,7 +35,7 @@ ls "$O"/c_all/lifted_*.c "$O/c_all/table.c" "$O/c_all/thunks.c" | xargs -P "${JO
 # objects of modules no longer lifted
 for o in "$P"/obj/lifted_*.o; do [ -e "$O/c_all/$(basename "$o" .o).c" ] || rm -f "$o"; done
 "$CC" -O1 -w -I"$HERE/rt" -c "$O/gl_thunks.c" -o "$P/obj/rt_gl_thunks.o"
-for s in kernel syscalls hostlibs hostaudio audiodev hostgame gles glsl_es texdecode plat_win plat_posix video_win; do
+for s in kernel syscalls hostlibs hostaudio hostvorbis audiodev hostgame gles glsl_es texdecode plat_win plat_posix video_win; do
     "$CC" -O1 -g -Wall -Wno-unused-function -I"$HERE/rt" -c "$HERE/rt/$s.c" -o "$P/obj/rt_$s.o"
 done
 "$CC" -o "$P/jp2015.exe" "$P"/obj/*.o -lsynchronization -lopengl32 -lgdi32 -luser32 -lwinmm -Wl,--stack,67108864
